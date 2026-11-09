@@ -94,7 +94,7 @@ class DatParser:
                 "bad_bytes": self.bad_bytes, "resyncs": self.resyncs, "orphans": self.orphans,
                 "has_trigger": self.has_trigger, "recovering": self.recovering}
 
-    def feed(self, data):
+    def feed(self, data, headers_only=False):
         self.buffer.extend(data)
         offset = 0
         while len(self.buffer) - offset >= 16:
@@ -118,11 +118,13 @@ class DatParser:
                     if len(self.buffer) - offset < size:
                         break  # Keep a partial payload, including across volume boundaries.
                     if self.has_trigger:
-                        payload = bytes(self.buffer[offset + 16:offset + size])
-                        yield {"type": "wave", "position": self.position + offset,
+                        record = {"type": "wave", "position": self.position + offset,
                                "board": head[1] >> 4, "channel": head[1] & 15, "wave_id": head[2],
-                               "ns": second * 1_000_000_000 + nano,
-                               "samples": np.frombuffer(payload, dtype=">u2")}
+                               "ns": second * 1_000_000_000 + nano}
+                        if not headers_only:
+                            payload = bytes(self.buffer[offset + 16:offset + size])
+                            record['samples'] = np.frombuffer(payload, dtype=">u2")
+                        yield record
                     else:
                         self.orphans += 1
                     offset += size

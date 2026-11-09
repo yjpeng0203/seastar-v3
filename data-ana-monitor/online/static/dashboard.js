@@ -49,6 +49,7 @@ const dashboard = (() => {
   function profileStatistics(id,model,lo,hi){
     let note=document.getElementById(id+"-range-statistics");
     if(!note){note=document.createElement("p");note.id=id+"-range-statistics";note.className="profile-note";document.getElementById(id+"-clock").after(note);}
+    if(model.deferred){note.textContent="原始值分布按需计算：点击放大详情后加载，时间趋势与误差带继续显示。";return;}
     if(model.stored){note.textContent="所选完整时段的原始观测分布统计："+model.list.map((s,i)=>{
       const d=model.stored[i];return d?s.name+" N="+fmt(d.n,0)+" μ="+fmt(d.mean===null?null:d.mean*model.width,4)+" σ="+fmt(d.sigma===null?null:d.sigma*model.width,4)+"；范围下/上方 "+d.underflow+" / "+d.overflow:"";
     }).filter(Boolean).join("； ");return;}
@@ -111,7 +112,7 @@ const dashboard = (() => {
     anchor.textContent = article.querySelector("h3").textContent + " · 详情已打开";
     article.replaceWith(anchor); document.getElementById("detail-content").append(article); article.classList.add("expanded-card");
     document.getElementById("detail-title").textContent = article.querySelector("h3").firstChild.textContent.trim();
-    detailTools(); dialog.showModal(); renderCharts(true); requestAnimationFrame(() => charts.forEach(c => c.resize()));
+    detailTools(); dialog.showModal(); renderCharts(true);if(typeof rawTrends!=="undefined")rawTrends.render();requestAnimationFrame(() => charts.forEach(c => c.resize()));
   }
   function decorate() {
     document.querySelectorAll(".plot").forEach(plot => {
@@ -154,10 +155,9 @@ const dashboard = (() => {
     option.yAxis.axisLabel.formatter = v => v >= 10000 || v < .001 ? Number(v).toExponential(0) : fmt(v,5);
   }
   const clockFormat = new Intl.DateTimeFormat("zh-CN",{timeZone:"Asia/Shanghai",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false});
-  function reference(id, lo, hi) {
+  function reference(id, lo, hi, r=state.beijing_reference) {
     let p = document.getElementById(id + "-clock");
     if (!p) {p = document.createElement("p");p.id = id+"-clock";p.className = "time-reference";document.getElementById(id).after(p);}
-    const r = state.beijing_reference;
     p.textContent = r ? "北京时间参考：约 " + clockFormat.format(new Date(r.origin_unix_ms + lo*1000)) + " ～ " + clockFormat.format(new Date(r.origin_unix_ms + hi*1000)) + "（分钟级估计，非跨串同步）" : "北京时间参考：当前区段无可用 CSV 锚点";
     p.title = r ? r.label+"；有效锚点 "+r.anchors+"，剔除异常 "+r.rejected : "相对采集时间及全部计算保持不变";
   }
@@ -195,6 +195,8 @@ const dashboard = (() => {
         return {type:"polygon",shape:{points},style:{fill:"#777777",opacity:.18}};}};
   }
   function trend(id,list,yName,width=1,view={}) {
+    const deferred=id!=="rates"&&!!state.raw_distributions_deferred;
+    const clockReference=Object.prototype.hasOwnProperty.call(view,"beijing_reference")?view.beijing_reference:state.beijing_reference;
     let minT=Infinity,maxT=-Infinity,minV=Infinity,maxV=-Infinity;
     const legend=charts.get(id)?.getOption().legend?.[0]?.selected||{};
     list.filter(s=>legend[s.name]!==false).forEach(s=>s.data.forEach(([t,v])=>{if(Number.isFinite(t)){minT=Math.min(minT,t);maxT=Math.max(maxT,t);}if(Number.isFinite(v)){minV=Math.min(minV,v);maxV=Math.max(maxV,v);}}));
@@ -242,19 +244,19 @@ const dashboard = (() => {
     const old=charts.get(id)?.getOption().dataZoom?.find(d=>d.id==="time-slider"),a=old?.start??0,b=old?.end??100;
     const lo=minT+(maxT-minT)*a/100,hi=minT+(maxT-minT)*b/100;
         list.forEach(s=>{s.z=3;});
-    option.series=list.concat(showErrors?list.filter(s=>s.uncertainty?.length).map(uncertaintyBand):[],list.map((s,i)=>histogramSeries(s.name,palette[i%palette.length],s.data,spec,lo,hi,rawFor(s),width)));
+    option.series=list.concat(showErrors?list.filter(s=>s.uncertainty?.length).map(uncertaintyBand):[],deferred?[]:list.map((s,i)=>histogramSeries(s.name,palette[i%palette.length],s.data,spec,lo,hi,rawFor(s),width)));
     if(id==="rates"){option.xAxis[1].name="时间箱数";for(const s of option.series)if(s.id?.startsWith("side-")){s.dimensions=["时间箱数","Hz 下界","Hz 上界"];s.tooltip={trigger:"item",formatter:p=>esc(p.seriesName)+"<br>时间箱数："+fmt(p.value[0],0)+"<br>Hz：["+fmt(p.value[1],4)+", "+fmt(p.value[2],4)+")"};}}
-    draw(id,option);reference(id,lo,hi);models.set(id,{list,width,minT,maxT,spec,rate:id==="rates",stored:allStored.length?list.map(rawFor):null});profileStatistics(id,models.get(id),lo,hi);
+    draw(id,option);reference(id,lo,hi,clockReference);models.set(id,{list,width,minT,maxT,spec,deferred,clockReference,rate:id==="rates",stored:allStored.length?list.map(rawFor):null});profileStatistics(id,models.get(id),lo,hi);
     let note=document.getElementById(id+"-profile-note");
     if(!note){note=document.createElement("p");note.className="profile-note";note.id=id+"-profile-note";document.getElementById(id+"-clock").after(note);}
-    note.textContent=view.note||state.raw_trend_note||"右侧按原始观测数值分箱；纵轴缩放仅改变可视范围。";
+    note.textContent=deferred?"原始值分布在放大详情中按需加载；缩略图不以均值点代替原始分布。":view.note||state.raw_trend_note||"右侧按原始观测数值分箱；纵轴缩放仅改变可视范围。";
     const chart=charts.get(id);if(!chart || chart.__profileBound)return;chart.__profileBound=true;
     chart.on("legendselectchanged",()=>setTimeout(()=>renderCharts(true),0));
     chart.on("datazoom",()=>{
       const m=models.get(id),zoom=chart.getOption().dataZoom.find(v=>v.id==="time-slider");if(!m||!zoom)return;
       const low=m.minT+(m.maxT-m.minT)*zoom.start/100,high=m.minT+(m.maxT-m.minT)*zoom.end/100;
-      if(m.stored){reference(id,low,high);return;}
-      chart.setOption({series:m.list.map((s,i)=>histogramSeries(s.name,palette[i%palette.length],s.data,m.spec,low,high))});reference(id,low,high);profileStatistics(id,m,low,high);
+      if(m.stored||m.deferred){reference(id,low,high,m.clockReference);return;}
+      chart.setOption({series:m.list.map((s,i)=>histogramSeries(s.name,palette[i%palette.length],s.data,m.spec,low,high))});reference(id,low,high,m.clockReference);profileStatistics(id,m,low,high);
     });
   }
   function countHistogram(id,rows,xName,yName){

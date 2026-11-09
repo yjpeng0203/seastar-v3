@@ -29,7 +29,8 @@ from histograms import query_histogram
 
 ASSETS = Path(__file__).resolve().parent / "static"
 # These releases share the same analysis and reader semantics; only UI/startup modes changed.
-PLOT_COMPATIBLE_BACKENDS = ('e0445348c0e23f6e3240b7d481f58cb8da4f377a2238496912f4d447dc15840a',
+PLOT_COMPATIBLE_BACKENDS = ('ab9c7d44e93f23a6742b4cf500180c6fe541ca2046e7c9e2d9a894b16ea8c79e',
+                            'e0445348c0e23f6e3240b7d481f58cb8da4f377a2238496912f4d447dc15840a',
                             '8a2f1968f7a2f8ffa7c83da76b67bf808f2c8da8d008ad559232fdb9aba1761f',
                             '568c1a65a11254e702a7225f6ad8a6430fc8da4c9c789302a80b05270f479dfe',
                             '4634e0ea18841130ff23b45f97191270b759b25182a09250e23836bc8b943800',
@@ -63,12 +64,23 @@ class Monitor:
         self.reader, self.parser, self.engine = None, None, None
         self.error, self.paused, self.last_arrival, self.last_scan = None, False, None, 0.
         self.host_bytes, self.host_waves, self.host_seconds = 0, 0, 0.
+        self.live_counter = None
         self.thread = threading.Thread(target=self.work, daemon=True, name="seastar-analysis")
 
     def start(self):
+        if self.source and self.source['kind']=='dat' and not self.replay and self.live_counter is None:
+            from live_rates import LiveRates
+            self.live_counter=LiveRates(self.data_dir,self.state_dir,self.source['key'],self.follow)
         self.thread.start()
 
     def select(self, source, fresh=False):
+        if self.live_counter and (source['kind']!='dat' or self.live_counter.source_key!=source['key']):
+            self.live_counter.close(); self.live_counter=None
+        if not self.replay and source['kind']=='dat' and self.thread.ident is not None and self.live_counter is None:
+            from live_rates import LiveRates
+            self.live_counter=LiveRates(self.data_dir,self.state_dir,source['key'],self.follow)
+        if self.live_counter:
+            self.live_counter.follow.set() if self.follow else self.live_counter.follow.clear()
         run_id, state = (None, None) if fresh else self.store.restore(source["key"], self.config, self.identity)
         if not fresh and run_id is None:
             for prior in PLOT_COMPATIBLE_BACKENDS:
@@ -93,6 +105,7 @@ class Monitor:
         self.host_bytes = self.host_waves = 0
         self.host_seconds = 0.
         self.checkpoint([])
+        self.publish()
         self.store.rebuild_native(self.run_id,asdict(self.config))
 
     def checkpoint(self, metrics):
@@ -157,6 +170,7 @@ class Monitor:
             self.paused = False
         elif action == "follow":
             self.follow = bool(command.get("follow")) and not self.replay
+            if self.live_counter:self.live_counter.follow.set() if self.follow else self.live_counter.follow.clear()
         elif action in ('receive-pause','receive-resume'):
             if self.receiver is None:
                 raise ValueError("当前不是远程接收模式")
@@ -250,6 +264,15 @@ class Monitor:
         with self.lock:
             return self.cached
 
+    def rates(self, request):
+        if request.get('live') and request.get('population','all')=='all' and self.source and self.source['kind']=='dat' and not self.replay:
+            from live_rates import query
+            return query(self.state_dir,self.source['key'],request,self.snapshot())
+        from rates import sqlite_rates
+        result=sqlite_rates(self.store.path,request,self.snapshot())
+        result.update(live=False,analysis_limited=True,published_host_unix_s=self.snapshot().get('published_host_unix_s'))
+        return result
+
     def work(self):
         last_publish = 0.
         try:
@@ -312,6 +335,7 @@ class Monitor:
             self.thread.join(timeout=30)
         if self.thread.is_alive():
             raise RuntimeError("分析线程未在 30 秒内停止；数据库保留上一次完整检查点")
+        if self.live_counter:self.live_counter.close()
         self.store.close()
 
 

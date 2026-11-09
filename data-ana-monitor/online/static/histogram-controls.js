@@ -108,7 +108,7 @@ const histogramControls = (() => {
     if (exact && state?.run_id) {
       const key = JSON.stringify(context(r));
       if (key !== r.key) { invalidate(r); r.key = key; }
-      if (!r.busy && r.attemptedWaves !== (state.waves || 0) && performance.now() - r.lastAttempt >= 5000)
+      if (!r.busy && r.attemptedWaves !== (state.waves || 0) && performance.now() - r.lastAttempt >= 30000)
         request(r, key);
     }
     const bounds = spec || (r.result ? r.result : {min: lo, max: hi, bins: native ? hi - lo : 200});

@@ -30,7 +30,7 @@ struct SeaDistribution {
   if(bins){if(dense.empty())dense.resize(bins);++dense[k];}else ++counts[k];
  }
 };
-SeaTimeBins seastar_time_means(const std::string& path,int segment,double lo,double hi,double width,long long max_seq,bool good_only,const std::vector<double>& lows,const std::vector<double>& highs,const std::vector<int>& nbins) {
+SeaTimeBins seastar_time_means(const std::string& path,int segment,double lo,double hi,double width,long long max_seq,bool good_only,const std::vector<double>& lows,const std::vector<double>& highs,const std::vector<int>& nbins,bool histograms) {
  TFile f(path.c_str(),"READ");TTreeReader r("metrics",&f);
  TTreeReaderValue<Int_t> ch(r,"channel"),board(r,"board"),seg(r,"segment"),good(r,"good");
  TTreeReaderValue<Long64_t> raw(r,"raw_ns"),tr(r,"trigger_ns"),ev(r,"event");
@@ -45,7 +45,7 @@ SeaTimeBins seastar_time_means(const std::string& path,int segment,double lo,dou
   for(int field=0;field<7;++field){
    if(field>=5)continue;
    if(slot!=8&&field!=4&&good_only&&values[4]==0)continue;
-   double v=values[field];distributions[slot][field].add(v,field,lows[field],highs[field],nbins[field]);
+   double v=values[field];if(histograms)distributions[slot][field].add(v,field,lows[field],highs[field],nbins[field]);
    if(std::isfinite(v)){b.sum[field]+=v;++b.n[field];double delta=v-b.mean[field];b.mean[field]+=delta/b.n[field];b.m2[field]+=delta*(v-b.mean[field]);}
   }
  };
@@ -93,7 +93,7 @@ def root_time_bins(path,cache_dir,request,snapshot):
         raise ValueError('时间箱宽须为正数，每个时段最多显示 100000 个时间箱')
     if not isinstance(request.get('histogram_settings',{}),dict):raise ValueError('数值直方图设置无效')
     if request.get('population','all') not in ('all','good'):raise ValueError('样本类型无效')
-    signature=[hashlib.sha256(CPP.encode()).hexdigest(),str(Path(path).resolve()),Path(path).stat().st_size,Path(path).stat().st_mtime_ns,lo,hi,segment,seq,width,request.get('population','all'),request.get('histogram_settings',{})]
+    signature=[hashlib.sha256(CPP.encode()).hexdigest(),str(Path(path).resolve()),Path(path).stat().st_size,Path(path).stat().st_mtime_ns,lo,hi,segment,seq,width,request.get('population','all'),request.get('histogram_settings',{}),request.get('include_distributions',True)]
     key=hashlib.sha256(json.dumps(signature).encode()).hexdigest()
     target=Path(cache_dir)/'time-bins'/f'{key}.json.gz'
     if target.exists():
@@ -108,7 +108,7 @@ def root_time_bins(path,cache_dir,request,snapshot):
             if any(type(v) not in (int,float) or not math.isfinite(v) for v in (low,high)) or not low<high or type(bins) is not int or not 1<=bins<=4096:raise ValueError('数值直方图设置无效')
             lows[field],highs[field],nbins[field]=float(low),float(high),bins
     R.seastar_time_means.__release_gil__=True
-    value=R.seastar_time_means(str(path),segment,lo,hi,float(width),seq,request.get('population')=='good',lows,highs,nbins)
+    value=R.seastar_time_means(str(path),segment,lo,hi,float(width),seq,request.get('population')=='good',lows,highs,nbins,bool(request.get('include_distributions',True)))
     answer=result(list(value.rows),None,True,request)
     import numpy as np
     names=('baseline','noise','amplitude','area','quality','interval','event_interval');hist={};stats={}
@@ -118,7 +118,7 @@ def root_time_bins(path,cache_dir,request,snapshot):
     answer['distributions']=stats
     answer['bin_statistics']=[[float(x) if math.isfinite(x) else None for x in row] for row in np.asarray(list(value.bin_statistics)).reshape(-1,16)]
     answer['mean_error_model']='sample standard error; N<2 unavailable; independent-observation assumption'
-    answer.update(raw=False,aggregation='time_mean',time_bin_s=width,observations=int(value.observations),min_s=lo,max_s=hi)
+    answer.update(raw=False,aggregation='time_mean',time_bin_s=width,observations=int(value.observations),min_s=lo,max_s=hi,distributions_deferred=not request.get('include_distributions',True))
     target.parent.mkdir(parents=True,exist_ok=True);temporary=target.with_suffix('.tmp.gz')
     with gzip.open(temporary,'wt') as stream:json.dump(answer,stream,ensure_ascii=False,allow_nan=False)
     temporary.replace(target);return answer
@@ -150,7 +150,7 @@ def sqlite_time_bins(path,request,snapshot):
         t=(max(lo,k*width)+min(hi,(k+1)*width))/2
         rows.append([k,code,t,t]+[v[0]/v[1] if v[1] else None for v in items])
     bin_statistics=[[k,code]+[v for item in items for v in (item[1],math.sqrt(max(0.,item[2]/(item[1]*(item[1]-1)))) if item[1]>1 else None)] for (code,k),items in sorted(bins.items())]
-    return dict(bin_statistics=bin_statistics,mean_error_model='sample standard error; N<2 unavailable',distributions=sqlite_distributions(path,request,snapshot),fields=page['fields'],rows=rows,run_id=request['run_id'],raw=False,aggregation='time_mean',time_bin_s=width,
+    return dict(bin_statistics=bin_statistics,mean_error_model='sample standard error; N<2 unavailable',distributions=sqlite_distributions(path,request,snapshot) if request.get('include_distributions',True) else {},distributions_deferred=not request.get('include_distributions',True),fields=page['fields'],rows=rows,run_id=request['run_id'],raw=False,aggregation='time_mean',time_bin_s=width,
                 observations=observations,count=len(rows),done=True,next_cursor=None,min_s=lo,max_s=hi)
 
 

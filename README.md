@@ -14,6 +14,17 @@ SeaStar 三串波形监控、FEE CSV 监控及测试结束归档。v3 汇总现�
 
 三串各用自身电子学时间；不进行跨串同步、符合或时空联合分析。
 
+## 3.0.1：计数率优先更新
+
+- 实时 DAT 使用独立轻量进程增量解析触发头和波形头，计数率不等待完整波形分析、质量筛选或逐波形指标写盘。三串独立计数；暂停完整分析时计数继续，启用新 Run 跟随时计数也可独立跟随。
+- 默认全部已记录波形，`Hz = 箱内整数计数 / 实际观测箱长`；保留默认 100 s、自定义箱宽、连线、Poisson 灰色误差带和右侧计数率分布。100 s 是统计箱宽，当前未满箱会持续更新。
+- 计数率使用独立 1 s 请求周期，正常前台运行的显示更新目标 ≤2 s；请求串行完成，不因数据增加而反复取消，等待或出错时保留上一幅图。界面显示计数时间、未读字节、缺卷/数据异常、无新增数据和计数已跟随的新 Run。
+- 合格波形计数率需要完整质量分析，界面明确标注分析进度限制。ROOT 历史回放继续复用原来的分析/计数路径。
+- 其他趋势每 10 s 自动更新；波形及其他面板每 30 s 更新，修改显示设置立即生效。原始 ADC 细分箱、单位换算及完整分析指标保持。
+- 其他时间趋势的右侧原始值分布在放大详情时计算；缩略图不以时间箱均值冒充原始分布。
+
+首次升级会从所选 Run 开头建立独立计数缓存，过程中显示计数未读量；之后原子保存计数和读取断点，重启续读。两秒目标需在工控机前台浏览器和正常磁盘负载下实测；初次追平、采集无新增或连接异常均显示实际状态，不伪造新数据。
+
 ## 工控机从 GitHub 下载（推荐）
 
 仓库已公开，下载无需 GitHub 登录、验证码或访问令牌。以下命令在工控机 Ubuntu 终端执行。
@@ -25,7 +36,7 @@ sudo apt update
 sudo apt install -y git
 mkdir -p ~/SeastarMonitor_pyj
 cd ~/SeastarMonitor_pyj
-git clone https://github.com/yjpeng0203/seastar-v3.git
+git -c http.version=HTTP/1.1 clone https://github.com/yjpeng0203/seastar-v3.git
 cd seastar-v3
 ```
 
@@ -44,11 +55,12 @@ sh scripts/start_ipc.sh
 
 ```sh
 cd ~/SeastarMonitor_pyj/seastar-v3
-git pull --ff-only
+git -c http.version=HTTP/1.1 pull --ff-only
+cat VERSION
 sh scripts/start_ipc.sh
 ```
 
-现场配置、镜像和运行状态不纳入 Git；网页更新后按 `Ctrl+Shift+R` 刷新。若需要生成可拷贝到其它工控机的离线安装包，可在项目目录执行 `python3 scripts/build_release.py`。
+现场配置、镜像和运行状态不纳入 Git；网页更新后按 `Ctrl+Shift+R` 刷新。HTTP/1.1 选项用于减少部分网络下的 GitHub TLS 中断，不关闭证书校验。更新命令需在带 `.git` 的克隆目录中运行；通过 ZIP/tar.gz 下载的源码目录请先另行克隆仓库，再按下方说明迁移现场配置。若需要生成可拷贝到其它工控机的离线安装包，可在项目目录执行 `python3 scripts/build_release.py`。
 
 ## 工控机迁移与配置
 

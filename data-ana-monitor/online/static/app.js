@@ -92,10 +92,11 @@ function renderQuality(){const list=selectedChannels(),names=list.map(c=>channel
  dashboard.countHistogram("multiplicity",Object.entries(state.multiplicity||{}),"每个触发的波形数","触发数");
  const flags=Object.keys(flagLabels),q=baseOption("质量标记","波形数");q.grid.bottom=105;q.xAxis={type:"category",data:flags.map(f=>flagLabels[f]),axisLabel:{rotate:32,fontSize:10,interval:0}};q.dataZoom=[];q.series=list.map((c,i)=>({type:"bar",name:channelName(c.key),stack:"flags",data:flags.map(f=>c.flags[f]||0),itemStyle:{color:palette[i%palette.length]}}));draw("qualityFlags",q);hist("pulsesHist","pulses");
  const diagnostics=[["数据字节异常",fmt(state.bad_bytes,0)+" 字节；只在找到合法触发头后重新同步"],["未完成记录",fmt(state.pending_bytes,0)+" 字节；等待追加，不作为丢包"],["无触发头波形",fmt(state.orphan_waves,0)+" 条；忽略并报告"],["原始触发头回退",fmt(state.header_backsteps,0)+" 次；空触发不参与默认时间轴"],["触发编号不连续",fmt(state.number_gaps,0)+" 次；ROOT 不保存无波形触发，不能直接认定丢包"],["时间段",fmt(state.segment+1,0)+"；时钟回退 "+fmt(state.clock_backsteps,0)+" 次"],["末事件",state.last_event_provisional?"暂定统计，下一触发到达后确认；不是重复累加":"完整 ROOT 回放 / 当前可见记录"],["合格筛选","排除低 SNR、基线不足/替代基线、边界截断、主脉冲削顶、主窗重叠与 ADC 越界。次脉冲与负尾单列。"],["CFD / 阈值无交点","保留为空值，图和统计不填 0；上升沿必须具有有效相邻点括区。"],["零 / 回退通道间隔",list.map(c=>c.key+": "+c.zero_intervals+" / "+c.negative_intervals).join("；")||"—"]];$("diagnostic-table").innerHTML=diagnostics.map(([a,b])=>"<tr><td>"+esc(a)+"</td><td>"+esc(b)+"</td></tr>").join("");}
-let chartSignature="";
+let chartSignature="",chartSeq=-1,lastChartRender=-Infinity;
 function renderCharts(force=false){if(!state||!state.config||typeof dashboard==="undefined")return;
- const signature=JSON.stringify([state.run_id,state.seq,activeTab,[...selected],...["population","units","logy","normalized","trend-range","show-stat-errors"].map(id=>$(id).value+$(id).checked)]);
- if(!force&&signature===chartSignature)return;chartSignature=signature;dashboard.decorate();dashboard.tasks();if(activeTab==="overview")renderOverview();if(activeTab==="waveforms")renderWaveforms();if(activeTab==="charge")renderCharge();if(activeTab==="timing")renderTiming();if(activeTab==="quality")renderQuality();}
+ const signature=JSON.stringify([state.run_id,activeTab,[...selected],...["population","units","logy","normalized","trend-range","show-stat-errors"].map(id=>$(id).value+$(id).checked)]);
+ if(!force&&signature===chartSignature&&(chartSeq===state.seq||performance.now()-lastChartRender<(activeTab==="overview"?10000:30000)))return;
+ chartSignature=signature;chartSeq=state.seq;lastChartRender=performance.now();dashboard.decorate();dashboard.tasks();if(activeTab==="overview")renderOverview();if(activeTab==="waveforms")renderWaveforms();if(activeTab==="charge")renderCharge();if(activeTab==="timing")renderTiming();if(activeTab==="quality")renderQuality();}
 function updateControls(){
  const groups=[...new Set(state.sources.map(s=>s.string_group).filter(Boolean))].sort((a,b)=>a.localeCompare(b,"en",{numeric:true}));
  const groupSig=groups.join(",");

@@ -200,7 +200,12 @@ class FleetMonitor:
         entry=next((e for e in self.entries.values() if e['snapshot'].get('run_id')==run),None)
         if not entry or not entry['port']:raise ValueError('分析会话未就绪或已经切换，请刷新')
         return entry
-    def rates(self,request):return self.request(self.owner(request.get('run_id')),'/api/rates',request)
+    def rates(self,request):
+        entry=self.owner(request.get('run_id'))
+        if request.get('live') and request.get('population','all')=='all' and entry['source']['kind']=='dat' and not self.replay:
+            from live_rates import query
+            return query(entry['directory'],entry['source']['key'],request,entry['snapshot'])
+        return self.request(entry,'/api/rates',request)
     def time_trend(self,request):return self.request(self.owner(request.get('run_id')),'/api/time-trend',request)
     def raw_trend(self,request):return self.request(self.owner(request.get('run_id')),'/api/raw-trend',request)
     def histogram(self,request):return self.request(self.owner(request.get('run_id')),'/api/histogram',request)
