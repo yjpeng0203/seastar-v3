@@ -14,9 +14,45 @@ SeaStar 三串波形监控、FEE CSV 监控及测试结束归档。v3 汇总现�
 
 三串各用自身电子学时间；不进行跨串同步、符合或时空联合分析。
 
-## 工控机迁移
+## 工控机从 GitHub 下载（推荐）
 
-本机打包：
+仓库已公开，下载无需 GitHub 登录、验证码或访问令牌。以下命令在工控机 Ubuntu 终端执行。
+
+首次下载：
+
+```sh
+sudo apt update
+sudo apt install -y git
+mkdir -p ~/SeastarMonitor_pyj
+cd ~/SeastarMonitor_pyj
+git clone https://github.com/yjpeng0203/seastar-v3.git
+cd seastar-v3
+```
+
+下载位置为 `~/SeastarMonitor_pyj/seastar-v3`。如果这个目录已经是克隆的仓库，直接使用下方更新命令，不必重复下载。
+
+首次运行前，按下方“工控机迁移与配置”准备现场配置，并确认“环境”一节中的依赖已安装。配置完成后启动：
+
+```sh
+cd ~/SeastarMonitor_pyj/seastar-v3
+sh scripts/start_ipc.sh
+```
+
+在工控机浏览器打开 CSV 监控 `http://127.0.0.1:8765`，波形监控及网页归档 `http://127.0.0.1:8766`。
+
+后续更新：先结束旧监视服务，DAQ 采集程序保持运行，再执行：
+
+```sh
+cd ~/SeastarMonitor_pyj/seastar-v3
+git pull --ff-only
+sh scripts/start_ipc.sh
+```
+
+现场配置、镜像和运行状态不纳入 Git；网页更新后按 `Ctrl+Shift+R` 刷新。若需要生成可拷贝到其它工控机的离线安装包，可在项目目录执行 `python3 scripts/build_release.py`。
+
+## 工控机迁移与配置
+
+也可通过离线安装包迁移。本机打包：
 
 ```sh
 python3 scripts/build_release.py
