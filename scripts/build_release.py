@@ -15,6 +15,8 @@ EXCLUDED_DIRS = {
     ".sync",
     ".archive",
     "runtime",
+    "state",
+    "mirror",
     "dist",
     "build",
     "results",
