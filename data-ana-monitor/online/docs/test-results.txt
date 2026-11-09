@@ -1,0 +1,45 @@
+test_derived_metrics_and_empty_range (test_histograms.HistogramTest.test_derived_metrics_and_empty_range) ... ok
+test_exact_bins_boundaries_range_statistics_and_missing (test_histograms.HistogramTest.test_exact_bins_boundaries_range_statistics_and_missing) ... ok
+test_fine_bins_use_raw_values_not_coarse_histogram_centers (test_histograms.HistogramTest.test_fine_bins_use_raw_values_not_coarse_histogram_centers) ... ok
+test_intervals_and_pair_differences_match_event_semantics (test_histograms.HistogramTest.test_intervals_and_pair_differences_match_event_semantics) ... ok
+test_invalid_settings_and_sql_column_names_are_rejected (test_histograms.HistogramTest.test_invalid_settings_and_sql_column_names_are_rejected) ... ok
+test_plot_only_upgrade_keeps_existing_metrics_and_cursor (test_histograms.HistogramTest.test_plot_only_upgrade_keeps_existing_metrics_and_cursor) ... ok
+test_atomic_metrics_checkpoint (test_online.OnlineTest.test_atomic_metrics_checkpoint) ... ok
+test_busy_port_closes_state_and_reports_alternative (test_online.OnlineTest.test_busy_port_closes_state_and_reports_alternative) ... ok
+test_cfd_below_noise_is_missing_not_a_spurious_crossing (test_online.OnlineTest.test_cfd_below_noise_is_missing_not_a_spurious_crossing) ... ok
+test_empty_trigger_clock_does_not_reset_waveform_time (test_online.OnlineTest.test_empty_trigger_clock_does_not_reset_waveform_time) ... ok
+test_engine_coincidences_wrap_and_clock_segments (test_online.OnlineTest.test_engine_coincidences_wrap_and_clock_segments) ... ok
+test_environment_check_reports_missing_dependencies_without_writing (test_online.OnlineTest.test_environment_check_reports_missing_dependencies_without_writing) ... ok
+test_every_byte_chunk_boundary_checkpoint_and_resync (test_online.OnlineTest.test_every_byte_chunk_boundary_checkpoint_and_resync) ... ok
+test_follow_new_run_same_second_respects_pause (test_online.OnlineTest.test_follow_new_run_same_second_respects_pause) ... ok
+test_headless_start_matches_fee_monitor_workflow (test_online.OnlineTest.test_headless_start_matches_fee_monitor_workflow) ... ok
+test_histogram_and_trends_preserve_counts (test_online.OnlineTest.test_histogram_and_trends_preserve_counts) ... ok
+test_launcher_preserves_callers_relative_data_path (test_online.OnlineTest.test_launcher_preserves_callers_relative_data_path) ... ok
+test_live_append_restart_http_and_exports (test_online.OnlineTest.test_live_append_restart_http_and_exports) ... ok
+test_local_launcher_never_starts_ssh_and_defaults_to_follow (test_online.OnlineTest.test_local_launcher_never_starts_ssh_and_defaults_to_follow) ... ok
+test_local_replay_spans_volumes_and_reports_incomplete_tail (test_online.OnlineTest.test_local_replay_spans_volumes_and_reports_incomplete_tail) ... ok
+test_mislabeled_compressed_dat_is_rejected_without_consuming_bytes (test_online.OnlineTest.test_mislabeled_compressed_dat_is_rejected_without_consuming_bytes) ... ok
+test_noise_negative_polarity_edge_clipping_and_pileup (test_online.OnlineTest.test_noise_negative_polarity_edge_clipping_and_pileup) ... ok
+test_overwrite_anchor_and_discovery_boundaries (test_online.OnlineTest.test_overwrite_anchor_and_discovery_boundaries) ... ok
+test_pending_pair_snapshot_is_exact_without_double_counting (test_online.OnlineTest.test_pending_pair_snapshot_is_exact_without_double_counting) ... ok
+test_position_invariant_area_and_timing (test_online.OnlineTest.test_position_invariant_area_and_timing) ... ok
+test_rotation_split_record_and_missing_volume (test_online.OnlineTest.test_rotation_split_record_and_missing_volume) ... ok
+test_runtime_modules_use_python38_syntax (test_online.OnlineTest.test_runtime_modules_use_python38_syntax) ... ok
+test_tail_does_not_bias_main_area_and_no_overlap (test_online.OnlineTest.test_tail_does_not_bias_main_area_and_no_overlap) ... ok
+test_two_writers_cannot_clobber_one_checkpoint (test_online.OnlineTest.test_two_writers_cannot_clobber_one_checkpoint) ... ok
+test_disconnect_after_read_resumes_without_duplicate_append (test_receiver.ReceiveTest.test_disconnect_after_read_resumes_without_duplicate_append) ... ok
+test_disk_reserve_prevents_any_source_connection (test_receiver.ReceiveTest.test_disk_reserve_prevents_any_source_connection) ... ok
+test_existing_data_and_duplicate_receivers_are_protected (test_receiver.ReceiveTest.test_existing_data_and_duplicate_receivers_are_protected) ... ok
+test_helper_read_ranges_binary_framing_and_scope (test_receiver.ReceiveTest.test_helper_read_ranges_binary_framing_and_scope) ... ok
+test_latest_run_only_and_idle_does_not_reread_history (test_receiver.ReceiveTest.test_latest_run_only_and_idle_does_not_reread_history) ... ok
+test_password_askpass_has_no_secret_files_or_environment (test_receiver.ReceiveTest.test_password_askpass_has_no_secret_files_or_environment) ... ok
+test_pause_append_resume_and_source_replacement (test_receiver.ReceiveTest.test_pause_append_resume_and_source_replacement) ... ok
+test_rate_limit_is_enforced (test_receiver.ReceiveTest.test_rate_limit_is_enforced) ... ok
+test_receiver_and_monitor_commit_exactly_once_across_restart (test_receiver.ReceiveTest.test_receiver_and_monitor_commit_exactly_once_across_restart) ... ok
+test_source_truncation_does_not_truncate_ipc_data (test_receiver.ReceiveTest.test_source_truncation_does_not_truncate_ipc_data) ... ok
+test_uncommitted_bytes_are_hidden_and_recovered (test_receiver.ReceiveTest.test_uncommitted_bytes_are_hidden_and_recovered) ... ok
+
+----------------------------------------------------------------------
+Ran 40 tests in 13.347s
+
+OK

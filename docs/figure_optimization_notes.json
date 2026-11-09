@@ -1,0 +1,26 @@
+{
+  "scope": "existing C++/ROOT report; no cross-string alignment or joint analysis",
+  "index_nonwhitespace_characters_before": 1554,
+  "index_nonwhitespace_characters_after": 1321,
+  "kept": [
+    "all counts and exact statistics",
+    "calibration and clock boundaries",
+    "all scalar observations and full-range tails"
+  ],
+  "compressed": [
+    "repeated per-page input paths and software hashes",
+    "repeated all/accepted per-channel pages"
+  ],
+  "relocated": [
+    "non-core spectra and within-board diagnostics to complete report",
+    "provenance to metadata and source tables"
+  ],
+  "not_added": [
+    "detector efficiency",
+    "causal interpretation of noise or temperature",
+    "TT/TTS or NPE calibration",
+    "cross-string synchronization"
+  ],
+  "binning": "Native ADC/integral bins are fixed first. Display-unit conversion clones the histogram and changes axis limits only; bin count and every bin content remain unchanged.",
+  "native_graphics": "C++/ROOT only; Matplotlib is not used in the rendering pipeline."
+}

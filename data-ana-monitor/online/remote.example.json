@@ -1,0 +1,14 @@
+{
+  "host": "pi@CHANGE_ME",
+  "remote_dir": "/home/pi/seastar-daq/data/both",
+  "pattern": "data_fee_3_*.dat",
+  "auth": "password",
+  "port": 22,
+  "poll_seconds": 1.0,
+  "scan_seconds": 10.0,
+  "chunk_kib": 256,
+  "max_mib_per_second": 2.0,
+  "min_free_gib": 2.0,
+  "request_timeout": 15.0,
+  "start_mode": "latest"
+}

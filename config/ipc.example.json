@@ -1,0 +1,36 @@
+{
+  "organizer": {
+    "raw_data_dir": "/home/ipc/disk/debug/data/both",
+    "decoder_bin": "../../build/decoder",
+    "decoder_config": "../../cfg/config.json",
+    "hadd_bin": "hadd",
+    "root_bin": "root",
+    "backend": "ipc",
+    "csv_mirror_dir": "~/.local/share/fee-monitor/mirror",
+    "output_root": "/home/ipc/disk/debug/data/organized",
+    "work_dir": "/home/ipc/disk/debug/data/organized/.organizer_work",
+    "layout": "group",
+    "board_map": {
+      "0": "G0",
+      "1": "G1",
+      "2": "G2",
+      "3": "G3",
+      "4": "G4",
+      "5": "G5",
+      "6": "G6"
+    },
+    "link_mode": "hardlink",
+    "readonly_protect": true,
+    "settle_seconds": 3.0,
+    "poll_seconds": 5.0,
+    "csv_margin_seconds": 60.0,
+    "csv_sync_wait_seconds": 15.0,
+    "nice_increment": 10,
+    "hadd_batch_size": 64
+  },
+  "monitors": {
+    "bind_host": "0.0.0.0",
+    "fee_port": 8765,
+    "ana_port": 8766
+  }
+}

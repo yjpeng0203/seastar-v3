@@ -1,0 +1,2 @@
+numpy>=1.19
+# Closed ROOT replay additionally needs ROOT 6 / matching PyROOT. DAT does not.

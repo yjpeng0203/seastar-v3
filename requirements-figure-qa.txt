@@ -1,0 +1,3 @@
+# Optional plotting fallback and exported-PDF QA; native ROOT rendering needs neither.
+matplotlib>=3.8
+PyMuPDF>=1.24

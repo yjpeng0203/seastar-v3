@@ -1,0 +1,17 @@
+{
+  "sample_ns": 2.0,
+  "snr": 5.0,
+  "end_sigma": 1.5,
+  "end_fraction": 0.005,
+  "cfd_fraction": 0.1,
+  "threshold_adc": 4.0,
+  "timing_snr": 3.0,
+  "adc_max": 4095,
+  "polarity": 0,
+  "min_baseline": 12,
+  "return_run": 3,
+  "padding": 2,
+  "adc_mv": 0.5,
+  "resistance": 50.0,
+  "display_stride": 10
+}

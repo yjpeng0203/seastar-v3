@@ -1,0 +1,12 @@
+{
+  "host": "请填写树莓派IP",
+  "user": "pi",
+  "port": 22,
+  "auth": "password",
+  "remote_path": "/home/pi/seastar-daq/fee-monitor/data",
+  "local_dir": "~/.local/share/fee-monitor/mirror",
+  "identity_file": "",
+  "poll_seconds": 5,
+  "scan_seconds": 30,
+  "limit_kib_per_second": 128
+}

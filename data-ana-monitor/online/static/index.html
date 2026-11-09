@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light"><title>SeaStar v3 · 波形在线分析</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <div><div class="eyebrow">SEASTAR / ACQUISITION OBSERVATORY</div><h1>波形在线分析 <span>LIVE ANALYSIS</span></h1></div>
+  <div class="connection"><i id="lamp"></i><span id="connection">连接中</span><small id="updated">—</small></div>
+</header>
+<main>
+  <section class="sourcebar" aria-label="采集数据源">
+    <label id="string-filter-label" for="string-filter" hidden>串筛选</label><select id="string-filter" hidden><option value="">全部串</option></select>
+    <label for="source">数据源</label><select id="source"><option>正在扫描文件…</option></select>
+    <button id="select-source" class="primary">查看所选串</button>
+    <label class="check"><input type="checkbox" id="follow">跟随同一 FEE 的新 Run</label>
+    <button id="freeze">冻结画面</button><button id="pause">暂停分析</button>
+    <div id="file" class="fileline">支持 DAT 增量读取、自动分卷与完整 ROOT 回放。</div>
+    <div id="input-mode" class="fileline"></div>
+  </section>
+  <div id="error" class="error" role="alert" hidden></div>
+  <section id="transfer-panel" class="sourcebar transfer-panel" aria-label="树莓派增量接收" hidden>
+    <strong>树莓派增量接收</strong><span id="transfer-status">等待连接</span>
+    <button id="receive-pause">暂停接收</button>
+    <div id="transfer-source" class="fileline"></div>
+    <div class="transfer-metrics">
+      <span>工控机已确认落盘 <b id="transfer-bytes">—</b></span>
+      <span>上次检查未接收量 <b id="transfer-backlog">—</b></span>
+      <span>源盘剩余空间 <b id="transfer-free">—</b></span>
+      <span>源文件读取模式 <b id="transfer-mode">—</b></span>
+    </div>
+    <div class="fileline">接收进度与分析进度分开保存。所有数据库与接收状态在工控机；树莓派原始文件只读，不自动删除。</div>
+  </section>
+  <section class="kpis" aria-label="运行统计">
+    <div><label>可见触发 / 无波形触发</label><strong id="triggers">—</strong><small id="empty-triggers">—</small></div>
+    <div><label>已分析波形</label><strong id="waves">—</strong><small id="channels-count">—</small></div>
+    <div><label>合格波形占比</label><strong id="good">—</strong><small id="good-count">—</small></div>
+    <div><label>当前段采集跨度</label><strong id="duration">—</strong><small id="time-segment">电子学相对时间</small></div>
+    <div><label>读取积压</label><strong id="backlog">—</strong><small id="throughput">—</small></div>
+  </section>
+  <div id="alerts" class="alerts" role="status" aria-live="polite"></div>
+  <div id="string-tasks" class="string-tasks" aria-label="所有串后台任务"></div>
+  <nav aria-label="分析视图">
+    <button data-tab="overview" class="active">运行概览</button><button data-tab="waveforms">波形与窗口</button>
+    <button data-tab="charge">幅度与积分</button><button data-tab="timing">定时与脉冲</button>
+    <button data-tab="quality">符合与质量</button><button data-tab="archive">测试结束 · 数据归档</button><button data-tab="settings">参数与导出</button>
+  </nav>
+  <div class="viewtools">
+    <div id="channel-filters" aria-label="显示通道"></div>
+    <div class="tools"><label for="population">统计样本</label><select id="population"><option value="good">合格波形</option><option value="all" selected>全部波形 · 含诊断</option></select>
+      <label for="units">幅度 / 积分单位</label><select id="units"><option value="adc">ADC / ADC·sample</option><option value="physical">mV / pC · 历史标度</option></select>
+      <label class="check"><input type="checkbox" id="logy">频数 logY</label>
+      <label class="check"><input type="checkbox" id="normalized">谱归一化</label>
+    </div>
+  </div>
+  <p class="basis" id="basis">时间轴使用电子学相对计数，非 UTC / 北京时间。原始采集文件只读。</p>
+  <section class="tab" id="tab-overview">
+    <div class="section-heading"><h2>采集随时间的变化</h2><div class="tools"><label for="trend-range">趋势范围</label><select id="trend-range"><option value="recent">最近 900 秒</option><option value="first">最早 60 秒</option><option value="all" selected>全部采集范围</option><option value="custom">指定采集时段</option></select><button id="reset-zoom">恢复图表缩放</button></div></div>
+    <div class="tools raw-tools"><label><input id="show-stat-errors" type="checkbox" checked>统计误差带</label><label><input id="time-bin-enabled" type="checkbox" checked>时间分箱</label><label>箱宽 / s<input id="time-bin-seconds" type="number" value="100" min="0.000001" step="any"></label><button id="time-bin-apply">应用时间分箱</button><label>采集秒下限<input id="raw-time-min" type="number" value="0" step="any"></label><label>上限<input id="raw-time-max" type="number" value="60" step="any"></label><button id="raw-apply">应用采集时段</button><select id="raw-segment" aria-label="独立时间段"></select><button id="raw-refresh">刷新趋势</button><button id="raw-prev" disabled>上一原值页</button><button id="raw-next" disabled>下一原值页</button></div><p id="raw-status" class="basis" role="status">正在准备逐条原值读取。</p>
+    <div class="grid"><article class="wide"><h3>波形 / 带波形事件计数率 <small>Hz = 时间箱内计数 / 实际观测箱长</small></h3><div id="rates" class="plot"></div></article>
+      <article><h3>基线漂移 <small>ADC · 全部波形估计值</small></h3><div id="baselineTrend" class="plot"></div></article>
+      <article><h3>幅度逐波形原值</h3><div id="amplitudeTrend" class="plot"></div></article>
+      <article><h3>基线噪声 <small>ADC · 稳健估计与截尾样本</small></h3><div id="noiseTrend" class="plot"></div></article>
+      <article><h3>主脉冲积分逐波形原值 <small>每条记录一点评估指标，不按时间取平均</small></h3><div id="chargeTrend" class="plot"></div></article>
+      <article><h3>逐条合格标记 <small>全部原始记录，0 为未通过，1 为通过</small></h3><div id="qualityTrend" class="plot"></div></article>
+    </div>
+    <div class="section-heading"><h2>通道统计</h2><small>频谱使用累计数据；点击通道可查看原始波形。</small></div>
+    <div class="tablewrap"><table><thead><tr><th>板号 : 通道</th><th>波形 / 合格</th><th>合格率</th><th>基线 ADC</th><th>噪声 ADC</th><th id="amplitude-th">幅度 ADC</th><th id="area-th">积分 ADC·sample</th><th>CFD ns</th><th>基线漂移 ADC</th><th>主要质量标记</th></tr></thead><tbody id="channel-table"></tbody></table></div>
+  </section>
+  <section class="tab" id="tab-waveforms" hidden>
+    <div class="section-heading"><h2>检查算法实际选择的窗口</h2><div class="tools"><label for="focus">通道</label><select id="focus"></select><label for="example">波形</label><select id="example"><option value="latest">最新抽样波形</option></select></div></div>
+    <p id="wave-info" class="basis"></p>
+    <div class="grid"><article class="wide"><h3>原始波形与自适应积分窗口 <small>灰色为候选基线区域，绿色为主脉冲积分区；基线样本经过异常点剔除</small></h3><div id="waveform" class="plot tall"></div></article>
+      <article><h3>近期抽样波形与平均波形 <small id="average-note">—</small></h3><div id="average" class="plot"></div></article>
+      <article><h3>按主峰对齐的平均波形 <small>横轴相对峰位，纵轴扣基线并按极性归一</small></h3><div id="aligned" class="plot"></div></article>
+      <article class="wide"><h3>原始 ADC 波形密度 <small id="density-note">仅图形抽样，频谱与统计不抽样</small></h3><div id="density" class="plot tall"></div></article></div>
+  </section>
+  <section class="tab" id="tab-charge" hidden>
+    <div class="section-heading"><h2>幅度与主脉冲积分</h2><small>主脉冲积分不自动叠加负向尾部；没有进行 NPE 标定。</small></div>
+    <div class="grid"><article><h3>扣基线峰高</h3><div id="amplitudeHist" class="plot"></div></article><article><h3>自适应主脉冲积分</h3><div id="chargeHist" class="plot"></div></article>
+      <article><h3>负向尾部面积 <small>独立诊断量，不代表已验证的电荷补偿</small></h3><div id="tailHist" class="plot"></div></article>
+      <article><h3>峰高与积分的关系 <small>每通道最多 1000 个抽样合格指标，仅用于显示</small></h3><div id="correlation" class="plot"></div></article>
+      <article><h3>基线分布</h3><div id="baselineHist" class="plot"></div></article><article><h3>噪声分布</h3><div id="noiseHist" class="plot"></div></article></div>
+  </section>
+  <section class="tab" id="tab-timing" hidden>
+    <div class="section-heading"><h2>波形内定时与形状</h2><small>所有 ns 定时均相对波形第 0 点，未扣光路与线缆延迟；不是已标定的 PMT 本征 TT。</small></div>
+    <div class="grid"><article><h3>主峰位置</h3><div id="peakHist" class="plot"></div></article><article><h3 id="cfd-title">CFD 到达时间</h3><div id="cfdHist" class="plot"></div></article>
+      <article><h3 id="threshold-title">固定阈值到达时间</h3><div id="thresholdHist" class="plot"></div></article><article><h3>单脉冲半高全宽 FWHM <small>由波形的两个半高交点计算</small></h3><div id="fwhmHist" class="plot"></div></article>
+      <article><h3>上升时间 10%–90%</h3><div id="riseHist" class="plot"></div></article><article><h3>下降时间 90%–10%</h3><div id="fallHist" class="plot"></div></article>
+      <article><h3>同通道波形时间间隔 <small>使用波形时间戳；零间隔与回退单列诊断</small></h3><div id="intervalHist" class="plot"></div></article>
+      <article><h3>触发时间间隔 <small>仅使用带波形事件，与 ROOT 一致；空触发单独累计</small></h3><div id="triggerIntervalHist" class="plot"></div></article>
+      <article><h3>实际积分窗口长度</h3><div id="windowHist" class="plot"></div></article><article><h3>信噪比</h3><div id="snrHist" class="plot"></div></article>
+      <article><h3>波形时间戳 − 触发时间戳 <small>电子学字段差值，不加到波形内定时上</small></h3><div id="waveDtHist" class="plot"></div></article></div>
+  </section>
+  <section class="tab" id="tab-quality" hidden>
+    <div class="section-heading"><h2>同触发关联与质量诊断</h2><small>符合按同一触发包归组，未进行跨板绝对时钟同步。</small></div>
+    <div class="grid"><article><h3>通道符合矩阵 <small>全部波形；对角线为含该通道的触发数</small></h3><div id="coincidence" class="plot tall"></div></article>
+      <article><h3>同触发通道 CFD 差 <small>后一个通道减前一个通道；仅合格定时</small></h3><div id="pairHist" class="plot tall"></div></article>
+      <article><h3>触发内波形重数 <small>包含无波形触发；末事件在追加过程中为暂定值</small></h3><div id="multiplicity" class="plot"></div></article>
+      <article><h3>质量标记计数 <small>同一波形可同时具有多个标记</small></h3><div id="qualityFlags" class="plot"></div></article>
+      <article><h3>每条波形检测到的脉冲数 · 上限 16</h3><div id="pulsesHist" class="plot"></div></article></div>
+    <div class="tablewrap"><table><thead><tr><th>诊断项</th><th>含义与处理</th></tr></thead><tbody id="diagnostic-table"></tbody></table></div>
+  </section>
+  <section class="tab" id="tab-archive" hidden>
+    <div class="section-heading"><h2>测试结束后，一键完成数据归档</h2><span id="archive-status" role="status" aria-live="polite">正在读取归档状态</span></div>
+    <p class="basis">选择本轮 Run，确认停止写入后，自动完成 DAT 解码、ROOT 合并、慢控制 CSV 匹配与批次校验。原始 DAT 保留；波形分卷与 trigger_signal 触发记录分别保存副本，触发记录不参与波形解码。</p>
+    <form id="archive-form" class="archive-panel">
+      <div id="archive-source" class="fileline"></div>
+      <div class="archive-settings">
+        <label for="archive-output">归档保存目录<input id="archive-output" type="text" autocomplete="off" spellcheck="false" required></label>
+        <label for="archive-csv">慢控制 CSV 目录<input id="archive-csv" type="text" autocomplete="off" spellcheck="false" required></label>
+        <label for="archive-name">批次名称（可留空）<input id="archive-name" type="text" autocomplete="off" spellcheck="false" placeholder="自动按采集日期命名"></label>
+      </div>
+      <details class="archive-advanced"><summary>高级：decoder 路径</summary><div class="archive-settings">
+        <label for="archive-decoder-bin">decoder 程序<input id="archive-decoder-bin" type="text" value="../../build/decoder" autocomplete="off" spellcheck="false" required></label>
+        <label for="archive-decoder-config">decoder 配置<input id="archive-decoder-config" type="text" value="../../cfg/config.json" autocomplete="off" spellcheck="false" required></label>
+      </div><p id="archive-paths" class="fileline"></p></details>
+      <div class="section-heading"><h3>本轮需要归档的数据</h3><button id="archive-latest" type="button">选择最新一轮</button></div>
+      <p id="archive-selection" class="basis">默认选择最新一轮，可逐项调整。</p>
+      <div class="tablewrap archive-runs"><table><thead><tr><th>选择 / 串</th><th>Run</th><th>可归档卷 / 总卷</th><th>原始数据量</th><th>分卷状态</th></tr></thead><tbody id="archive-runs"></tbody></table></div>
+      <label class="archive-confirm"><input id="archive-confirm" type="checkbox" required>本轮测试已结束，所选数据不再写入</label>
+      <div class="tools"><button id="archive-check" type="button">检查环境</button><button id="archive-start" type="submit" class="primary" disabled>开始归档</button></div>
+      <div id="archive-error" class="error" role="alert" hidden></div>
+      <div id="archive-notice" class="alert warning" hidden></div>
+    </form>
+    <div class="archive-panel archive-progress"><strong id="archive-progress">等待开始归档</strong><div class="archive-stages" aria-label="归档步骤"><span data-archive-stage="decode">DAT 解码</span><span data-archive-stage="copy">原始卷复制</span><span data-archive-stage="merge">ROOT 合并</span><span data-archive-stage="csv">CSV 匹配</span><span data-archive-stage="verify">批次校验</span><span data-archive-stage="complete">完成</span></div></div>
+    <section id="archive-result" class="archive-panel" hidden><h3 id="archive-result-title">归档结果</h3><p id="archive-result-path" class="archive-result-path"></p><ul id="archive-warnings" class="archive-warnings" hidden></ul><div class="tablewrap"><table><thead><tr><th>串 / Run</th><th>原始卷数</th><th>波形数</th><th>合并 ROOT</th><th>慢控制 CSV</th></tr></thead><tbody id="archive-results"></tbody></table></div></section>
+  </section>
+  <section class="tab" id="tab-settings" hidden>
+    <div class="settings-grid"><article><h2>分析规则</h2><p>先以短前沿区估计基线与噪声，再剔除脉冲前异常点并重估基线。主峰在整条波形中搜索，积分边界由连续回到噪声范围的采样点决定。前沿不安静时寻找替代区并标记，不混入默认合格统计。</p>
+      <form id="config-form">
+        <label>采样间隔 ns<input name="sample_ns" type="number" step="any" min="0.01" max="1000" required></label>
+        <label>检测阈值 / 噪声 σ<input name="snr" type="number" step=".1" min="2" max="30" required></label>
+        <label>回到基线阈值 / σ<input name="end_sigma" type="number" step=".1" min=".5" max="10" required></label>
+        <label>尾界限 / 峰高比例<input name="end_fraction" type="number" step=".0001" min=".0001" max=".1" required></label>
+        <label>CFD 恒比<input name="cfd_fraction" type="number" step=".01" min=".01" max=".9" required></label>
+        <label>定时固定阈值 ADC<input name="threshold_adc" type="number" step=".1" min=".1" max="65535" required></label>
+        <label>定时交点最低阈高 / σ<input name="timing_snr" type="number" step=".1" min="1" max="10" required></label>
+        <label>ADC 上轨码<input name="adc_max" type="number" min="16" max="65535" required></label>
+        <label>脉冲极性<select name="polarity"><option value="0">每条波形自动判断</option><option value="1">正脉冲</option><option value="-1">负脉冲</option></select></label>
+        <label>最少基线点数<input name="min_baseline" type="number" min="6" max="256" required></label>
+        <label>连续回到基线点数<input name="return_run" type="number" min="2" max="20" required></label>
+        <label>边界向外扩展点数<input name="padding" type="number" min="0" max="32" required></label>
+        <label>显示抽样步长<input name="display_stride" type="number" min="1" max="10000" required></label>
+        <label>历史标度 mV / ADC<input name="adc_mv" type="number" step="any" min=".0001" max="1000" required></label>
+        <label>输入阻抗 Ω<input name="resistance" type="number" step="any" min="1" max="10000" required></label>
+        <button type="submit" class="primary">应用规则并新建分析会话</button>
+      </form><p class="basis">参数不在已有频谱上直接改变。应用后从源文件重新分析，旧会话与逐波形指标仍保存在数据库中。</p>
+    </article><article><h2>数据导出与可追溯性</h2><p>累计均值与总体标准差使用全部所选样本。默认频谱覆盖全部有限值：幅度/基线/噪声按 1 ADC/bin，积分按 1 ADC·sample/bin；单位换算只改横轴，不合并箱或改变计数。时间量按 1 ns/bin；间隔保留原始 log 分箱，符合时间差保留原分箱。均值和 σ 直接由逐波形指标计算。</p>
+      <div class="export-tools"><a class="button primary" id="all-export" href="api/metrics.csv">导出全部逐波形 CSV</a><a class="button" id="channel-export" href="api/metrics.csv">导出当前通道 CSV</a><a class="button" id="summary-export" href="api/summary.json">导出统计 / 配置 JSON</a><button id="restart">用当前规则新建会话</button></div>
+      <dl id="provenance"></dl>
+      <h3>时间基准</h3><p>带波形事件的电子学触发时间减去首条带波形触发，标为“相对采集时间”。电子学时钟回退会建立新时间段；不同段不拼成连续绝对时间。主机更新时间只用于判断读取是否停滞。</p>
+      <h3>使用范围</h3><p>直接监控持续追加的 DAT。ROOT 只用于完整、关闭文件的回放。一个服务选择一个采集 Run，并跟随其分卷；多个独立 FEE Run 可分别启动服务，使用不同端口与状态目录。</p>
+      <p>硬件采集文件只读。SQLite 同时提交逐波形指标、统计与读取位置；进程重启后恢复已完成的检查点。磁盘记录随采集量增长，应为指标数据库预留空间。</p>
+    </article></div>
+  </section>
+  <footer><span id="footer-source">等待数据源</span><span>原始计数与质量筛选分开保留 · 图中右上角可保存 PNG</span></footer>
+</main>
+<script src="vendor/echarts.min.js"></script><script src="histogram-controls.js"></script><script src="app.js"></script><script src="dashboard.js"></script><script src="raw-trends.js"></script><script src="archive.js"></script>
+</body></html>
