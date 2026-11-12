@@ -44,6 +44,7 @@ def reusable_raw_cache(analysis, specs):
         if record.get("source_analysis")!=str(analysis.resolve()) or not record.get("figure_cache_key"):continue
         cache=Path(__file__).resolve().parents[1]/"runtime/figure-cache"/record["figure_cache_key"]
         if not (cache/"complete.json").is_file():continue
+        if json.loads((cache/"complete.json").read_text()).get("storage_schema")!="native-bins-bounded-v2":continue
         file=R.TFile.Open(str(cache/"focused.root"),"READ")
         if not file or file.IsZombie():continue
         binning=file.Get("binning")
@@ -56,36 +57,97 @@ def reusable_raw_cache(analysis, specs):
 REBIN_CPP = r"""
 #include <TTreeReader.h>
 #include <TTreeReaderValue.h>
+#include <THnSparse.h>
+#include <TH1D.h>
+#include <TFile.h>
 #include <memory>
+#include <algorithm>
 #include <cmath>
+#include <fstream>
+#include <iomanip>
+#include <map>
+#include <array>
+#include <vector>
 namespace seastar_figure {
-std::vector<Long64_t> rebin(TTree* tree, const std::vector<std::string>& names,
-                           const std::vector<double>& low, const std::vector<double>& high,
-                           const std::vector<int>& bins) {
-    const int nm=names.size();
-    std::vector<size_t> offsets(nm+1);
-    for(int m=0;m<nm;++m) offsets[m+1]=offsets[m]+2*8*(bins[m]+3);
-    std::vector<Long64_t> out(offsets.back());
-    TTreeReader reader(tree);
-    TTreeReaderValue<int> channel(reader,"channel"), good(reader,"good"), pulses(reader,"pulses");
-    std::vector<std::unique_ptr<TTreeReaderValue<double>>> fields;
-    for(auto name:names) fields.emplace_back(name=="pulses"?nullptr:new TTreeReaderValue<double>(reader,name.c_str()));
-    Long64_t processed=0;
-    while(reader.Next()) {
-        ++processed; int ch=*channel;
-        if(ch<0 || ch>=8) throw std::runtime_error("Unexpected channel in metric TTree");
-        for(int m=0;m<nm;++m) {
-            double value=fields[m]?**fields[m]:*pulses;
-            int bin;
-            if(!std::isfinite(value)) bin=bins[m]+2;
-            else if(value<low[m]) bin=bins[m];
-            else if(value>high[m]) bin=bins[m]+1;
-            else bin=std::min(bins[m]-1,int((value-low[m])*bins[m]/(high[m]-low[m])));
-            for(int pop=0;pop<=int(*good!=0);++pop) ++out[offsets[m]+(pop*8+ch)*(bins[m]+3)+bin];
+const int dense_limit=262144;
+const Long64_t sparse_limit=2000000;
+std::vector<double> occupied(TObject* obj,int points=0) {
+    auto h=dynamic_cast<TH1*>(obj);auto sparse=dynamic_cast<THnSparse*>(obj);
+    if(!h&&!sparse)throw std::runtime_error("Unsupported native histogram object");
+    auto axis=h?h->GetXaxis():sparse->GetAxis(0);
+    std::vector<std::array<double,2>> values;
+    std::map<int,std::array<double,2>> preview;
+    auto add=[&](int bin,double n){
+        if(bin<1||bin>axis->GetNbins()||n==0)return;
+        double x=axis->GetBinCenter(bin);
+        if(points>0){int k=std::min(points-1,int((x-axis->GetXmin())*points/(axis->GetXmax()-axis->GetXmin())));
+            auto it=preview.find(k);if(it==preview.end()||n>it->second[1])preview[k]={x,n};}
+        else values.push_back({x,n});
+    };
+    if(h)for(int k=1;k<=h->GetNbinsX();++k)add(k,h->GetBinContent(k));
+    else{Int_t coord[1];for(Long64_t k=0;k<sparse->GetNbins();++k){double n=sparse->GetBinContent(k,coord);add(coord[0],n);}}
+    if(points>0)for(auto& item:preview)values.push_back(item.second);
+    else std::sort(values.begin(),values.end(),[](const auto&a,const auto&b){return a[0]<b[0];});
+    std::vector<double> out;out.reserve(values.size()*2);
+    for(auto& item:values)out.insert(out.end(),item.begin(),item.end());return out;
+}
+std::vector<Long64_t> export_metric(TTree* tree,const std::string& field,const std::string& name,
+                                  double low,double high,int bins,TFile* output,
+                                  const std::string& bins_path,const std::string& coverage_path) {
+    std::vector<Long64_t> coverage(16*4);
+    std::ofstream counts(bins_path,std::ios::app),totals(coverage_path,std::ios::app);
+    counts<<std::setprecision(17);
+    auto write=[&](TObject* obj,int slot){
+        auto h=dynamic_cast<TH1*>(obj);auto sparse=dynamic_cast<THnSparse*>(obj);
+        Long64_t* c=coverage.data()+slot*4;
+        auto add=[&](int k,Long64_t n){
+            if(k==0)c[1]+=n;else if(k==bins+1)c[2]+=n;
+            else {c[0]+=n;if(n)counts<<name<<","<<(slot/8?"accepted":"all")<<","<<slot%8<<","<<low+k-1<<","<<low+k<<","<<n<<"\n";}
+        };
+        if(h)for(int k=0;k<=bins+1;++k)add(k,(Long64_t)h->GetBinContent(k));
+        else{Int_t coord[1];for(Long64_t k=0;k<sparse->GetNbins();++k){double n=sparse->GetBinContent(k,coord);add(coord[0],(Long64_t)n);}}
+        totals<<name<<","<<(slot/8?"accepted":"all")<<","<<slot%8<<","<<c[0]<<","<<c[1]<<","<<c[2]<<","<<c[3]<<"\n";
+        output->cd();obj->Write();
+    };
+    auto make_name=[&](int slot){return (name.rfind("full_",0)==0?"full_":"")+std::string(slot/8?"accepted_":"all_")+field+"_ch"+std::to_string(slot%8);};
+    if(bins<=dense_limit){
+        std::vector<std::unique_ptr<TH1D>> hs;
+        for(int slot=0;slot<16;++slot){hs.emplace_back(new TH1D(make_name(slot).c_str(),"",bins,low,high));hs.back()->SetDirectory(nullptr);}
+        TTreeReader r(tree);TTreeReaderValue<int> ch(r,"channel"),good(r,"good"),pulses(r,"pulses");
+        std::unique_ptr<TTreeReaderValue<double>> value(field=="pulses"?nullptr:new TTreeReaderValue<double>(r,field.c_str()));
+        Long64_t processed=0;
+        while(r.Next()){
+            ++processed;if(*ch<0||*ch>=8)throw std::runtime_error("Unexpected channel in metric TTree");
+            double v=value?**value:*pulses;
+            for(int pop=0;pop<=int(*good!=0);++pop){int slot=pop*8+*ch;
+                if(!std::isfinite(v)){++coverage[slot*4+3];continue;}
+                hs[slot]->Fill(v==high?std::nextafter(high,low):v);
+            }
+        }
+        if(processed!=tree->GetEntries())throw std::runtime_error("Incomplete scalar rebin pass");
+        for(int slot=0;slot<16;++slot)write(hs[slot].get(),slot);
+    }else{
+        // Large spans stay sparse. One channel at a time bounds simultaneous allocations.
+        for(int channel=0;channel<8;++channel){
+            std::vector<std::unique_ptr<THnSparseD>> hs;
+            for(int pop=0;pop<2;++pop)hs.emplace_back(new THnSparseD(make_name(pop*8+channel).c_str(),"",1,&bins,&low,&high));
+            TTreeReader r(tree);TTreeReaderValue<int> ch(r,"channel"),good(r,"good"),pulses(r,"pulses");
+            std::unique_ptr<TTreeReaderValue<double>> value(field=="pulses"?nullptr:new TTreeReaderValue<double>(r,field.c_str()));
+            Long64_t processed=0;
+            while(r.Next()){
+                ++processed;if(*ch<0||*ch>=8)throw std::runtime_error("Unexpected channel in metric TTree");
+                if(*ch!=channel)continue;double v=value?**value:*pulses;
+                for(int pop=0;pop<=int(*good!=0);++pop){
+                    if(!std::isfinite(v)){++coverage[(pop*8+channel)*4+3];continue;}
+                    double x=v==high?std::nextafter(high,low):v;hs[pop]->Fill(&x);
+                    if(hs[pop]->GetNbins()>sparse_limit)throw std::runtime_error("Native sparse histogram exceeds the per-channel occupied-bin budget; source metrics are retained");
+                }
+            }
+            if(processed!=tree->GetEntries())throw std::runtime_error("Incomplete sparse scalar rebin pass");
+            for(int pop=0;pop<2;++pop)write(hs[pop].get(),pop*8+channel);
         }
     }
-    if(processed!=tree->GetEntries()) throw std::runtime_error("Incomplete scalar rebin pass");
-    return out;
+    return coverage;
 }
 }
 """
@@ -113,6 +175,31 @@ std::vector<double> rebin(TTree *tree,int limit) {
 """
 
 
+def read_histogram(file, name):
+    """Read one independent object, rather than keeping every histogram in TFile's cache."""
+    import ROOT as R
+    key=file.GetKey(name)
+    if not key:raise ValueError('Missing native histogram: '+name)
+    obj=key.ReadObj()
+    if obj.InheritsFrom('TH1'):obj.SetDirectory(0)
+    R.SetOwnership(obj,True)
+    return obj
+
+
+def native_rows(obj, points=0):
+    """Compact occupied-bin array. Selection happens in C++ before Python conversion."""
+    import ROOT as R
+    import numpy as np
+    if not hasattr(R,'seastar_figure') and not R.gInterpreter.Declare(REBIN_CPP):
+        raise RuntimeError('Cannot initialize native histogram reader')
+    values=R.seastar_figure.occupied(obj,points)
+    return np.asarray(values,dtype=np.float64).reshape(-1,2).copy()
+
+
+def native_axis(obj):
+    return obj.GetXaxis() if obj.InheritsFrom('TH1') else obj.GetAxis(0)
+
+
 def export_plot_data(analysis, target, include_readback=True):
     """Write focused ROOT histograms and exact count tables, with a reusable cache."""
     import ROOT as R
@@ -127,7 +214,7 @@ def export_plot_data(analysis, target, include_readback=True):
         rows=[row for (metric,pop,ch),row in statistics.items() if metric==name and pop=="all" and int(row["n"])>0]
         if rows:
             low=math.floor(min(float(row["min"]) for row in rows))
-            high=max(low+1,math.ceil(max(float(row["max"]) for row in rows)))
+            high=max(low+1,math.floor(max(float(row["max"]) for row in rows))+1)
             if name=="pulses":low,high=-.5,16.5
             specs["full_"+name]=(low,high,int(high-low))
     native_specs=dict(specs)
@@ -157,40 +244,30 @@ def export_plot_data(analysis, target, include_readback=True):
         if not hasattr(R, "seastar_figure") and not R.gInterpreter.Declare(REBIN_CPP):
             raise RuntimeError("Cannot initialize scalar rebinning")
         names = list(native_specs)
-        fields=[name[5:] if name.startswith("full_") else name for name in names]
-        result = R.seastar_figure.rebin(tree, fields, [native_specs[k][0] for k in names],
-                                       [native_specs[k][1] for k in names], [native_specs[k][2] for k in names])
         out = R.TFile.Open(str(cache/"focused.root"), "RECREATE")
         if not out or out.IsZombie(): raise ValueError("Cannot create focused ROOT file")
         R.TH1.AddDirectory(False)
-        with (cache/"focused_bin_counts.csv").open("w",newline="") as bins_file, (cache/"focus_coverage.csv").open("w",newline="") as coverage_file:
-            bins_writer=csv.writer(bins_file);bins_writer.writerow(("metric","population","channel","bin_low","bin_high","count"))
-            coverage_writer=csv.writer(coverage_file);coverage_writer.writerow(("metric","population","channel","shown","below","above","missing"))
-            offset=0
-            for m,name in enumerate(names):
-                low,high,bins=native_specs[name];width=(high-low)/bins
-                assert width==1
-                for pop,label in enumerate(("all","accepted")):
+        counts_path,coverage_path=cache/"focused_bin_counts.csv",cache/"focus_coverage.csv"
+        counts_path.write_text("metric,population,channel,bin_low,bin_high,count\n")
+        coverage_path.write_text("metric,population,channel,shown,below,above,missing\n")
+        try:
+            for name in names:
+                low,high,bins=native_specs[name]
+                if bins>2**31-2:raise ValueError("Native histogram axis exceeds ROOT integer-bin capacity; source scalar values are retained")
+                field=name[5:] if name.startswith("full_") else name
+                coverage=R.seastar_figure.export_metric(tree,field,name,float(low),float(high),bins,out,str(counts_path),str(coverage_path))
+                for pop in range(2):
                     for ch in range(8):
-                        start=offset+(pop*8+ch)*(bins+3)
-                        counts=list(result[start:start+bins+3])
-                        field=name[5:] if name.startswith("full_") else name
+                        slot=(pop*8+ch)*4
                         expected=statistics.get((field,"all" if pop==0 else "good",ch))
                         if expected:
-                            assert sum(counts[:bins+2])==int(expected["n"])
-                            assert counts[bins+2]==int(expected["missing"])
-                        hist_name=("full_" if name.startswith("full_") else "")+label+"_"+field+f"_ch{ch}"
-                        hist=R.TH1D(hist_name,"",bins,low,high)
-                        for i,count in enumerate([counts[bins]]+counts[:bins]+[counts[bins+1]]):hist.SetBinContent(i,count)
-                        hist.SetEntries(sum(counts[:bins+2]));hist.Write()
-                        # Sparse CSV: unlisted bins have exactly zero count. ROOT retains every bin.
-                        for i,count in enumerate(counts[:bins]):
-                            if count:bins_writer.writerow((name,label,ch,low+i*width,low+(i+1)*width,count))
-                        coverage_writer.writerow((name,label,ch,sum(counts[:bins]),counts[bins],counts[bins+1],counts[bins+2]))
-                offset+=2*8*(bins+3)
-            R.TNamed("binning",json.dumps(specs)).Write()
-        out.Close();root.Close()
-        (cache/"complete.json").write_text(json.dumps({"cache_key":key,"waveforms":metadata["waves"]}))
+                            assert sum(int(coverage[slot+i]) for i in range(3))==int(expected["n"])
+                            assert int(coverage[slot+3])==int(expected["missing"])
+            out.cd();R.TNamed("binning",json.dumps(specs)).Write()
+            R.TNamed("native_histogram_storage","native-bins-bounded-v2: TH1D for <=262144 bins; THnSparseD otherwise; unallocated bins are exact zeros").Write()
+        finally:
+            out.Close();root.Close()
+        (cache/"complete.json").write_text(json.dumps({"cache_key":key,"waveforms":metadata["waves"],"storage_schema":"native-bins-bounded-v2"}))
     if not (cache/"pairs_complete.json").is_file():
         root=R.TFile.Open(str(source),"READ")
         if not hasattr(R,"seastar_pair_bins") and not R.gInterpreter.Declare(PAIR_CPP):raise RuntimeError("Cannot prepare within-board pair bins")
@@ -222,16 +299,21 @@ def export_plot_data(analysis, target, include_readback=True):
                 low,high,bins=specs[prefix+destination]
                 for population in ("all","accepted"):
                     for ch in range(8):
-                        raw=output.Get(f"{prefix}{population}_{field}_ch{ch}")
-                        converted=raw.Clone(f"{prefix}{population}_{destination}_ch{ch}");converted.SetDirectory(0)
-                        moments=array('d',[0.]*4);raw.GetStats(moments)
-                        # Only change the axis calibration. Never call Rebin or SetBins here.
-                        converted.GetXaxis().SetLimits(low,high)
-                        converted.PutStats(array('d',[moments[0],moments[1],moments[2]*scale,moments[3]*scale*scale]))
-                        assert converted.GetNbinsX()==raw.GetNbinsX()==bins
+                        raw=read_histogram(output,f"{prefix}{population}_{field}_ch{ch}")
+                        converted=raw.Clone(f"{prefix}{population}_{destination}_ch{ch}")
+                        R.SetOwnership(converted,True)
+                        if converted.InheritsFrom("TH1"):
+                            converted.SetDirectory(0)
+                            moments=array('d',[0.]*4);raw.GetStats(moments)
+                            converted.GetXaxis().SetLimits(low,high)
+                            converted.PutStats(array('d',[moments[0],moments[1],moments[2]*scale,moments[3]*scale*scale]))
+                            assert converted.GetNbinsX()==raw.GetNbinsX()==bins
+                        else:
+                            converted.GetAxis(0).SetLimits(low,high)
+                            assert converted.GetAxis(0).GetNbins()==bins
                         assert converted.GetEntries()==raw.GetEntries()
-                        assert converted.Integral(0,bins+1)==raw.Integral(0,bins+1)
-                        converted.Write(converted.GetName(),R.TObject.kOverwrite)
+                        output.cd();converted.Write(converted.GetName(),R.TObject.kOverwrite)
+                        del converted,raw
         R.TNamed("binning",json.dumps(specs)).Write("binning",R.TObject.kOverwrite)
         R.TNamed("unit_conversion","Native ADC bins are fixed; axis calibration changes only coordinates, never counts.").Write("unit_conversion",R.TObject.kOverwrite)
         output.Close()
@@ -253,7 +335,7 @@ def export_plot_data(analysis, target, include_readback=True):
                         writer.writerow(calibrated)
             temporary.replace(cache/filename)
         (cache/"conversions_complete.json").write_text(json.dumps(conversions))
-        (cache/"complete.json").write_text(json.dumps({"cache_key":key,"waveforms":metadata["waves"],"binning_basis":"native values before conversion"}))
+        (cache/"complete.json").write_text(json.dumps({"cache_key":key,"waveforms":metadata["waves"],"binning_basis":"native values before conversion","storage_schema":"native-bins-bounded-v2"}))
     shutil.copy2(cache/"focused.root",target/"root/focused.root")
     for name in ("focused_bin_counts.csv","focus_coverage.csv"):
         shutil.copy2(cache/name,target/"tables"/name)
@@ -267,6 +349,7 @@ def export_plot_data(analysis, target, include_readback=True):
     metadata["source_analysis"]=str(analysis.resolve())
     metadata["figure_cache_key"]=key
     metadata["binning_basis"]="native values before display-unit conversion"
+    metadata["histogram_storage_schema"]="native-bins-bounded-v2"
     metadata["histogram_unit_conversions"]=conversions
     (target/"analysis.json").write_text(json.dumps(metadata,ensure_ascii=False,indent=2))
     # Build readback objects only when the source analysis did not already store them.

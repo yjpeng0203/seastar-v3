@@ -60,7 +60,7 @@ class RateTest(unittest.TestCase):
     def test_real_default_rates_match_saved_root_counts(self):
         project=Path(__file__).resolve().parents[3]
         directory=project/'runtime/replay-20261101_1102_/strings/G5/closed'
-        candidates=list(directory.glob('*/snapshot.json'))
+        candidates=[p for p in directory.glob('*/snapshot.json') if (Path(json.loads(p.read_text()).get('analysis_path',''))/'analysis.json').is_file()]
         if not candidates:self.skipTest('optional completed real-data cache missing')
         s=json.loads(candidates[0].read_text());path=Path(s['analysis_path'])/'root/analysis.root'
         r=root_rates(path,dict(run_id=s['run_id'],time_bin_s=100,max_seq=s['seq'],population='all'),s)

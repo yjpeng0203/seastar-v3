@@ -29,7 +29,8 @@ from histograms import query_histogram
 
 ASSETS = Path(__file__).resolve().parent / "static"
 # These releases share the same analysis and reader semantics; only UI/startup modes changed.
-PLOT_COMPATIBLE_BACKENDS = ('ab9c7d44e93f23a6742b4cf500180c6fe541ca2046e7c9e2d9a894b16ea8c79e',
+PLOT_COMPATIBLE_BACKENDS = ('7e72e8f0a5a9b7e637bc0998f595e1ef3833780fa0b616d8ae1573c67bc356f3',
+                            'ab9c7d44e93f23a6742b4cf500180c6fe541ca2046e7c9e2d9a894b16ea8c79e',
                             'e0445348c0e23f6e3240b7d481f58cb8da4f377a2238496912f4d447dc15840a',
                             '8a2f1968f7a2f8ffa7c83da76b67bf808f2c8da8d008ad559232fdb9aba1761f',
                             '568c1a65a11254e702a7225f6ad8a6430fc8da4c9c789302a80b05270f479dfe',
@@ -41,11 +42,12 @@ PLOT_COMPATIBLE_BACKENDS = ('ab9c7d44e93f23a6742b4cf500180c6fe541ca2046e7c9e2d9a
 
 
 class Monitor:
-    def __init__(self, data_dir, state_dir, config=None, source=None, follow=False, poll=.5, receiver=None, replay=False, read_gate=None):
+    def __init__(self, data_dir, state_dir, config=None, source=None, follow=False, poll=.5, receiver=None, replay=False, read_gate=None, pressure=None):
         self.data_dir, self.state_dir = Path(data_dir).resolve(), Path(state_dir).resolve()
         self.config = config or Config()
         self.receiver=receiver
         self.read_gate=read_gate
+        self.pressure=pressure
         self.replay = replay
         self.poll, self.requested_source, self.follow = poll, source, follow and not replay
         self.analyzer = Analyzer(self.config, self.state_dir / "build")
@@ -264,6 +266,11 @@ class Monitor:
         with self.lock:
             return self.cached
 
+    def query_target(self,request):
+        snap=self.snapshot()
+        if request.get('run_id')!=snap.get('run_id'):raise ValueError('分析会话已变化，请刷新')
+        return dict(kind='sqlite',path=str(self.store.path),state_dir=str(self.state_dir),snapshot=snap)
+
     def rates(self, request):
         if request.get('live') and request.get('population','all')=='all' and self.source and self.source['kind']=='dat' and not self.replay:
             from live_rates import query
@@ -287,6 +294,10 @@ class Monitor:
                     if time.monotonic() - self.last_scan > 1:
                         self.scan()
                     read = False
+                    if self.pressure is not None and self.pressure.is_set():
+                        self.cached=dict(self.cached,resource_paused=True)
+                        self.stop.wait(.5)
+                        continue
                     if self.source and not self.paused and not self.error:
                         start = time.perf_counter()
                         from contextlib import nullcontext
@@ -336,11 +347,21 @@ class Monitor:
         if self.thread.is_alive():
             raise RuntimeError("分析线程未在 30 秒内停止；数据库保留上一次完整检查点")
         if self.live_counter:self.live_counter.close()
+        if hasattr(self,'query_jobs'):self.query_jobs.close()
         self.store.close()
 
 
 def make_handler(monitor):
+    from query_jobs import QueryRunner
+    if not hasattr(monitor,'query_jobs'):monitor.query_jobs=QueryRunner(monitor.state_dir)
     class Handler(BaseHTTPRequestHandler):
+        def disconnected(self):
+            import select
+            import socket
+            try:
+                ready,_,_=select.select([self.connection],[],[],0)
+                return bool(ready) and self.connection.recv(1,socket.MSG_PEEK)==b''
+            except (OSError,ValueError):return True
         def send(self, body, mime="application/json; charset=utf-8", status=200, headers=None):
             self.send_response(status)
             self.send_header("Content-Type", mime)
@@ -409,7 +430,7 @@ def make_handler(monitor):
                         text.seek(0); text.truncate()
                 else:
                     files = {"/": "index.html", "/index.html": "index.html", "/app.js": "app.js",
-                             "/histogram-controls.js":"histogram-controls.js", "/dashboard.js":"dashboard.js", "/raw-trends.js":"raw-trends.js", "/archive.js":"archive.js",
+                             "/histogram-controls.js":"histogram-controls.js", "/query-client.js":"query-client.js", "/dashboard.js":"dashboard.js", "/raw-trends.js":"raw-trends.js", "/archive.js":"archive.js",
                              "/style.css": "style.css", "/vendor/echarts.min.js": "vendor/echarts.min.js",
                              "/vendor/LICENSE": "vendor/LICENSE", "/vendor/NOTICE": "vendor/NOTICE"}
                     if url.path not in files:
@@ -424,7 +445,7 @@ def make_handler(monitor):
 
         def do_POST(self):
             try:
-                if self.path not in ("/api/control","/api/histogram","/api/raw-trend","/api/time-trend","/api/rates","/api/archive"):
+                if self.path not in ("/api/control","/api/histogram","/api/raw-trend","/api/time-trend","/api/rates","/api/archive","/api/query-cancel"):
                     self.send(b'{"error":"not found"}', status=404)
                     return
                 origin = self.headers.get("Origin")
@@ -435,6 +456,13 @@ def make_handler(monitor):
                 if not 0 < size <= 8192 or self.headers.get("Content-Type", "").split(";")[0] != "application/json":
                     raise ValueError("需要不超过 8 KiB 的 JSON 请求")
                 command = json.loads(self.rfile.read(size))
+                if not isinstance(command,dict):raise ValueError('需要 JSON 对象')
+                if self.path=='/api/query-cancel':
+                    self.send(dumps(monitor.query_jobs.cancel(command.get('query_id'))).encode());return
+                heavy=self.path in ('/api/time-trend','/api/raw-trend','/api/histogram') or (self.path=='/api/rates' and not (command.get('live') and command.get('population','all')=='all' and not getattr(monitor,'replay',False) and (monitor.snapshot().get('source') or {}).get('kind')=='dat'))
+                if heavy and hasattr(monitor,'query_target'):
+                    value=monitor.query_jobs.run(monitor.query_target(command),self.path,command,self.disconnected)
+                    self.send(dumps(value).encode());return
                 if self.path == "/api/archive":
                     service = getattr(monitor, "archive_service", None)
                     if service is None:raise ValueError("当前服务未启用测试结束归档")

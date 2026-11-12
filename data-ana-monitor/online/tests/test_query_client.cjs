@@ -1,0 +1,15 @@
+"use strict";
+const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),assert=require('node:assert/strict');
+const requests=[],events={};
+const context=vm.createContext({AbortController,Map,Math,Date,JSON,window:{addEventListener:(name,fn)=>events[name]=fn},fetch:async(url,options)=>{requests.push({url,body:JSON.parse(options.body),keepalive:options.keepalive});return {};}});
+vm.runInContext(fs.readFileSync(path.join(__dirname,'../static/query-client.js'),'utf8'),context);
+const first=new AbortController(),second=new AbortController();context.first=first;context.second=second;
+const id=vm.runInContext('queryClient.start("trend",first)',context);
+const replacement=vm.runInContext('queryClient.start("trend",second)',context);
+assert.notEqual(id,replacement);assert.equal(first.signal.aborted,true);
+assert.equal(requests[0].url,'api/query-cancel');assert.equal(requests[0].body.query_id,id);assert.equal(requests[0].keepalive,true);
+context.id=replacement;vm.runInContext('queryClient.finish(id);queryClient.cancel("trend")',context);
+assert.equal(second.signal.aborted,false);assert.equal(requests.length,1);
+vm.runInContext('queryClient.start("hist",second)',context);events.pagehide();
+assert.equal(second.signal.aborted,true);assert.equal(requests.length,2);
+console.log('Heavy-query replacement and page close cancel the actual backend token.');

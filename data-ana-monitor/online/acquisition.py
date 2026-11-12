@@ -156,6 +156,7 @@ class DatReader:
         self.current = s.get("current")
         self.finished = False
         self.waiting_for_volume = None
+        self.verified = {}
 
     def state(self):
         return {"offsets": self.offsets, "signatures": self.signatures,
@@ -182,6 +183,18 @@ class DatReader:
             path = (self.directory / name).resolve()
             path.relative_to(self.directory)
             offset = self.offsets.get(name, 0)
+            metadata = path.stat()
+            fingerprint = (metadata.st_dev,metadata.st_ino,metadata.st_size,metadata.st_mtime_ns,metadata.st_ctime_ns)
+            visible = metadata.st_size
+            if commits is not None:
+                if name not in commits:raise SourceChanged('接收清单不再包含已选文件: '+name)
+                visible=commits[name]['committed']
+                if metadata.st_size<visible or [metadata.st_dev,metadata.st_ino]!=commits[name].get('local_identity'):
+                    raise SourceChanged('已提交接收文件被更改: '+name)
+            prior=self.verified.get(name)
+            if prior==fingerprint and offset==visible:continue
+            if prior is not None and item['index']<current_index and prior!=fingerprint:
+                raise SourceChanged('已切换的旧分卷发生变化: '+name)
             with path.open("rb") as stream:
                 stat = os.fstat(stream.fileno())
                 visible_size=stat.st_size
@@ -213,6 +226,7 @@ class DatReader:
                 stream.seek(offset)
                 data = stream.read(min(max_bytes,max(0,visible_size-offset)))
                 self.current = name
+                self.verified[name] = (stat.st_dev,stat.st_ino,stat.st_size,stat.st_mtime_ns,stat.st_ctime_ns)
                 if data:
                     offset += len(data)
                     self.offsets[name] = offset

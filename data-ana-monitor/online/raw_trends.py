@@ -115,10 +115,29 @@ def sqlite_page(path,request,snapshot):
         # t is the original trigger-relative time; query a margin, then use exact waveform time.
         where='run=? AND segment=? AND seq<=? AND t>=? AND t<=?'
         args=[run,segment,seq,lo-margin,hi+margin]
-        first=db.execute('SELECT seq,t FROM metrics WHERE '+where+' AND seq>=? ORDER BY seq LIMIT 1',args+[cursor]).fetchone()
+        channels=[tuple(map(int,c['key'].split(':'))) for c in snapshot.get('channels',[])]
+        if not channels:
+            saved=db.execute('SELECT state FROM runs WHERE id=?',(run,)).fetchone()
+            state=json.loads(saved[0]) if saved and saved[0] else {}
+            channels=[tuple(map(int,k.split(':'))) for k in state.get('engine',{}).get('channels',{})]
+        if not channels:channels=list(db.execute('SELECT DISTINCT board,channel FROM metrics WHERE run=?',(run,)))
+        tails=[]
+        for b,c in channels:
+            item=db.execute('SELECT seq FROM metrics WHERE '+where+' AND board=? AND channel=? ORDER BY t DESC,seq DESC LIMIT 1',args+[b,c]).fetchone()
+            if item:tails.append(item[0])
+        if not tails:return result([],None,True,request)
+        # A sequence bound prevents a short early interval from scanning the entire future run.
+        args[2]=max(tails)
+        if lo>0 and not cursor:
+            candidates=[]
+            for b,c in channels:
+                item=db.execute('SELECT seq,t FROM metrics WHERE '+where+' AND board=? AND channel=? ORDER BY t,seq LIMIT 1',args+[b,c]).fetchone()
+                if item:candidates.append(item)
+            first=min(candidates) if candidates else None
+        else:first=db.execute('SELECT seq,t FROM metrics WHERE '+where+' AND seq>=? ORDER BY seq LIMIT 1',args+[cursor]).fetchone()
         if not first:return result([],None,True,request)
         before=first[0];first_t=first[1];previous={}
-        for b,c in db.execute('SELECT DISTINCT board,channel FROM metrics WHERE run=?',(run,)):
+        for b,c in channels:
             row=db.execute('SELECT raw_ns FROM metrics WHERE run=? AND board=? AND channel=? AND segment=? AND t<=? AND seq<? ORDER BY t DESC,seq DESC LIMIT 1',(run,b,c,segment,first_t,before)).fetchone()
             if row:previous[(b,c)]=row[0]
         prior=db.execute('SELECT seq,trigger_number,raw_ns-CAST(wave_dt_ns AS INTEGER) FROM metrics WHERE run=? AND segment=? AND seq<? ORDER BY seq DESC LIMIT 1',(run,segment,before)).fetchone()

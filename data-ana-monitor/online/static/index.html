@@ -41,7 +41,7 @@
     <div><label>读取积压</label><strong id="backlog">—</strong><small id="throughput">—</small></div>
   </section>
   <div id="alerts" class="alerts" role="status" aria-live="polite"></div>
-  <div id="string-tasks" class="string-tasks" aria-label="所有串后台任务"></div>
+  <p id="runtime-status" class="basis" role="status"></p><div id="string-tasks" class="string-tasks" aria-label="所有串后台任务"></div>
   <nav aria-label="分析视图">
     <button data-tab="overview" class="active">运行概览</button><button data-tab="waveforms">波形与窗口</button>
     <button data-tab="charge">幅度与积分</button><button data-tab="timing">定时与脉冲</button>
@@ -158,5 +158,5 @@
   </section>
   <footer><span id="footer-source">等待数据源</span><span>原始计数与质量筛选分开保留 · 图中右上角可保存 PNG</span></footer>
 </main>
-<script src="vendor/echarts.min.js"></script><script src="histogram-controls.js"></script><script src="app.js"></script><script src="dashboard.js"></script><script src="raw-trends.js"></script><script src="archive.js"></script>
+<script src="vendor/echarts.min.js"></script><script src="query-client.js"></script><script src="histogram-controls.js"></script><script src="app.js"></script><script src="dashboard.js"></script><script src="raw-trends.js"></script><script src="archive.js"></script>
 </body></html>

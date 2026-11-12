@@ -15,6 +15,7 @@ const histogramControls = (() => {
     try { localStorage.setItem(storageKey, JSON.stringify(preferences)); } catch (_) {}
   }
   function invalidate(r) {
+    if(typeof queryClient!=="undefined")queryClient.cancel("hist-"+r.id);
     if (r.controller) r.controller.abort();
     r.generation++; r.busy = false; r.result = null; r.error = null; r.key = null;
     r.attemptedWaves = -1; r.lastAttempt = -Infinity;
@@ -71,7 +72,8 @@ const histogramControls = (() => {
   function request(r, key) {
     const generation = ++r.generation;
     const controller = new AbortController(); r.controller = controller;
-    const body = {...context(r), max_seq: state.seq || 0};
+    const queryId=typeof queryClient!=="undefined"?queryClient.start("hist-"+r.id,controller):undefined;
+    const body = {...context(r), max_seq: state.seq || 0,allow_latest:typeof frozen!=="undefined"?!frozen:true,_query_id:queryId};
     r.busy = true; r.error = null; r.lastAttempt = performance.now();
     r.attemptedWaves = state.waves || 0;
     fetch("api/histogram", {method: "POST", headers: {"Content-Type": "application/json"},
@@ -85,6 +87,7 @@ const histogramControls = (() => {
         if (r.generation === generation && error.name !== "AbortError") r.error = error.message;
       })
       .finally(() => {
+        if(typeof queryClient!=="undefined")queryClient.finish(queryId);
         if (r.generation !== generation) return;
         r.busy = false;
         if (state && r.key === key) renderCharts(true);

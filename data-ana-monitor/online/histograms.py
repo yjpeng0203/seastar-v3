@@ -9,6 +9,7 @@ import math
 from pathlib import Path
 import re
 import sqlite3
+import sys
 import time
 
 import numpy as np
@@ -21,6 +22,11 @@ SPECIAL = {'window_ns','snr','interval_log10_s','trigger_interval_log10_s','pair
 _NATIVE_CACHE = OrderedDict()
 _QUERY_LOCKS = weakref.WeakValueDictionary()
 _LOCK_GUARD = threading.Lock()
+_CACHE_BYTES = 32*1024*1024
+
+
+def cache_bytes(accum):
+    return sum(sys.getsizeof(v.counts)+(sum(sys.getsizeof(k)+sys.getsizeof(n) for k,n in v.counts.items()) if isinstance(v.counts,dict) else 0) for v in accum.values())
 
 
 class Counts:
@@ -116,17 +122,35 @@ def _query_histogram(path,request):
         if native and saved.get('engine'):
             indexed=db.execute('SELECT max_seq FROM native_index WHERE run=?',(run,)).fetchone()
             engine=saved['engine']
-            if indexed and seq>=engine.get('seq',0):
+            if indexed and (seq>=engine.get('seq',0) or request.get('allow_latest')):
+                preview=request.get('preview_points');preview=preview if type(preview) is int and 32<=preview<=4096 else None
+                bounds=[]
+                if preview:
+                    for key in accum:
+                        board,ch=map(int,key.split(':'));params=(run,metric,population,board,ch)
+                        low=db.execute('SELECT bin FROM native_bins WHERE run=? AND metric=? AND population=? AND board=? AND channel=? ORDER BY bin LIMIT 1',params).fetchone()
+                        high=db.execute('SELECT bin FROM native_bins WHERE run=? AND metric=? AND population=? AND board=? AND channel=? ORDER BY bin DESC LIMIT 1',params).fetchone()
+                        if low:bounds.append((low[0],high[0]+1))
+                low=min((v[0] for v in bounds),default=0);high=max((v[1] for v in bounds),default=1)
                 for key,value in accum.items():
                     board,ch=map(int,key.split(':'))
-                    value.counts=dict(db.execute('SELECT bin,n FROM native_bins WHERE run=? AND metric=? AND population=? AND board=? AND channel=? ORDER BY bin',
-                                               (run,metric,population,board,ch)))
+                    rows=db.execute('SELECT bin,n FROM native_bins WHERE run=? AND metric=? AND population=? AND board=? AND channel=? ORDER BY bin',(run,metric,population,board,ch))
+                    if preview:
+                        buckets={}
+                        for k,n in rows:
+                            bucket=min(preview-1,int((k+.5-low)*preview/(high-low)))
+                            if bucket not in buckets or n>buckets[bucket][1]:buckets[bucket]=(k,n)
+                        value.counts=dict(buckets.values())
+                    else:value.counts=dict(rows)
                     channel=engine.get('channels',{}).get(key,{})
                     stats=channel.get('stats',{}).get(population,{}).get(metric,{})
                     value.n=value.total=stats.get('n',0);value.mean=stats.get('mean',0);value.m2=stats.get('m2',0)
                     value.missing=channel.get('n' if population=='all' else 'good',0)-value.n
-                result=_result(metric,run,seq,lo,hi,bins,population,accum,native)
+                actual=engine.get('seq',indexed[0])
+                result=_result(metric,run,actual,lo,hi,bins,population,accum,native)
+                if preview:result.update(min=low,max=high,bins=high-low,bin_width=1)
                 result['index_source']='persistent'
+                result.update(requested_max_seq=seq,snapshot_advanced=actual>seq)
                 return preview_result(result,request.get('preview_points'))
 
         db.set_progress_handler(lambda: int(time.monotonic()>deadline),100000)
@@ -187,10 +211,11 @@ def _query_histogram(path,request):
                     if time.monotonic()>deadline:raise ValueError(f'统计超过 {timeout} 秒，请减少通道或稍后重试')
             if metric=='pair_dt_ns':finish_event()
             flush()
-        if cacheable and (not prior or prior[0]<=watermark):
+        if cacheable and (not prior or prior[0]<=watermark) and cache_bytes(accum)<=_CACHE_BYTES:
             _NATIVE_CACHE[cache_key]=(watermark,accum)
             _NATIVE_CACHE.move_to_end(cache_key)
-            while len(_NATIVE_CACHE)>16:_NATIVE_CACHE.popitem(last=False)
+            while len(_NATIVE_CACHE)>16 or sum(cache_bytes(v[1]) for v in _NATIVE_CACHE.values())>_CACHE_BYTES:_NATIVE_CACHE.popitem(last=False)
+        elif cacheable and cache_bytes(accum)>_CACHE_BYTES:_NATIVE_CACHE.pop(cache_key,None)
         return preview_result(_result(metric,run,seq,lo,hi,bins,population,accum,native),request.get('preview_points'))
     except sqlite3.DatabaseError as error:
         raise ValueError('分布查询未完成：'+str(error)) from error
@@ -200,8 +225,8 @@ def _query_histogram(path,request):
 
 def _result(metric,run,seq,lo,hi,bins,population,accum,native=False):
     if native:
-        occupied=[i for value in accum.values() for i in value.counts]
-        lo=min(occupied) if occupied else 0;hi=max(occupied)+1 if occupied else 1
+        lo=min((min(value.counts) for value in accum.values() if value.counts),default=0)
+        hi=max((max(value.counts)+1 for value in accum.values() if value.counts),default=1)
         bins=hi-lo
     return {'metric':metric,'run_id':run,'max_seq':seq,'min':lo,'max':hi,'bins':bins,
             'bin_width':(hi-lo)/bins,'population':population,'binning':'native' if native else 'custom',

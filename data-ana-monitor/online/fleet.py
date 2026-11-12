@@ -37,11 +37,12 @@ def canonical_sources(sources,replay):
     return sorted(chosen,key=lambda s:(s['kind']==preferred,s.get('stamp',''),max(f['mtime_ns'] for f in s['files'])),reverse=True)
 
 
-def worker(data_dir,state_dir,config,source,follow,poll,replay,read_gate,build_gate,ready,stop):
+def worker(data_dir,state_dir,config,source,follow,poll,replay,read_gate,build_gate,ready,stop,pressure):
     signal.signal(signal.SIGINT,signal.SIG_IGN)
-    if replay:
-        import os
-        os.nice(5)
+    import os
+    os.nice(10 if replay or source['kind']=='root' else 5)
+    from runtime_resources import role
+    role('SeaAna-'+str(source.get('string_group','FEE')))
     from http.server import ThreadingHTTPServer
     from server import Monitor,make_handler
     from replay_cache import ReplayCache
@@ -49,7 +50,7 @@ def worker(data_dir,state_dir,config,source,follow,poll,replay,read_gate,build_g
     try:
         if replay and source['kind']=='root' and source.get('board_id') is not None:
             monitor=ReplayCache(data_dir,state_dir,Config(**config),source,read_gate,build_gate)
-        else:monitor=Monitor(data_dir,state_dir,Config(**config),source['key'],follow,poll,replay=replay,read_gate=read_gate)
+        else:monitor=Monitor(data_dir,state_dir,Config(**config),source['key'],follow,poll,replay=replay,read_gate=read_gate,pressure=pressure)
         server=ThreadingHTTPServer(('127.0.0.1',0),make_handler(monitor))
         server.daemon_threads=True
         ready.put(dict(port=server.server_port));monitor.start()
@@ -82,7 +83,8 @@ class FleetMonitor:
                 group=explicit.get('string_group')
                 self.sources=[explicit if s.get('string_group')==group else s for s in self.sources]
         self.active=next((s['key'] for s in self.sources if s['key']==source or any(f['name']==source for f in s['files'])),self.sources[0]['key'] if self.sources else '')
-        self.ctx=mp.get_context('spawn');self.read_gate=self.ctx.Lock();self.build_gate=self.ctx.Lock()
+        self.ctx=mp.get_context('spawn');self.read_gate=self.ctx.Lock();self.build_gate=self.ctx.Lock();self.pressure=self.ctx.Event()
+        self.resources={};self.resource_checked=0
         self.stop=threading.Event();self.entries={};self.guard=threading.RLock();self.commands=self
         self.store=SimpleNamespace(close=self.close)
         self.opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -98,14 +100,26 @@ class FleetMonitor:
         entry=dict(source=source,directory=directory,port=None,snapshot={},error=None)
         gate=self.read_gate if rotational(self.data_dir/source['files'][0]['name']) else None
         ready=self.ctx.Queue();stop=self.ctx.Event()
-        process=self.ctx.Process(target=worker,args=(str(self.data_dir),str(directory),asdict(config or self.config),source,self.follow,self.poll,self.replay,gate,self.build_gate,ready,stop),name='SeaStar-'+(source.get('string_group') or key))
+        process=self.ctx.Process(target=worker,args=(str(self.data_dir),str(directory),asdict(config or self.config),source,self.follow,self.poll,self.replay,gate,self.build_gate,ready,stop,self.pressure),name='SeaStar-'+(source.get('string_group') or key))
         entry.update(process=process,ready=ready,stop=stop);self.entries[key]=entry;process.start()
+        from runtime_resources import record
+        record(self.state_dir/'processes.jsonl','analysis_started',role=source.get('string_group'),source=key,worker_pid=process.pid)
 
     def watch(self):
         while not self.stop.is_set():
+            if time.monotonic()-self.resource_checked>1:
+                from runtime_resources import snapshot,SOFT_BYTES
+                self.resources=snapshot();self.resource_checked=time.monotonic()
+                if self.resources['rss_bytes']>=SOFT_BYTES:self.pressure.set()
+                elif self.resources['rss_bytes']<SOFT_BYTES*.8:self.pressure.clear()
+                if time.monotonic()-getattr(self,'last_resource_log',0)>10:
+                    from runtime_resources import record
+                    record(self.state_dir/'resources.jsonl','resources',**self.resources)
+                    self.last_resource_log=time.monotonic()
             with self.guard:
                 active=sum(self.busy(e) for e in self.entries.values())
                 for source in self.sources:
+                    if source['kind']=='root' and not self.replay and source['key']!=self.active:continue
                     if source['key'] not in self.entries and active<self.limit:self.launch(source);active+=1
                 entries=list(self.entries.values())
             for entry in entries:
@@ -152,7 +166,8 @@ class FleetMonitor:
                 e=self.entries.get(source['key'],{});s=e.get('snapshot',{})
                 tasks.append(dict(key=source['key'],group=source.get('string_group') or source['key'],status='error' if e.get('error') else s.get('status','starting' if e else 'queued'),
                   waves=s.get('waves',0),backlog=s.get('backlog'),backlog_unit=s.get('backlog_unit'),rate=s.get('analysis_waves_per_s'),cache_mode=s.get('cache_mode'),eta_seconds=s.get('eta_seconds'),error=e.get('error') or s.get('error')))
-            snap.update(sources=self.sources,tasks=tasks,workers=self.limit,active_source=self.active,data_dir=str(self.data_dir),input_mode='replay' if self.replay else 'remote' if self.receiver else 'local')
+            snap.update(sources=self.sources,tasks=tasks,workers=self.limit,active_source=self.active,data_dir=str(self.data_dir),input_mode='replay' if self.replay else 'remote' if self.receiver else 'local',resources=self.resources,resource_paused=self.pressure.is_set())
+            if hasattr(self,'query_jobs'):snap['query_tasks']=self.query_jobs.snapshot()
             if self.receiver:snap['transfer']=self.receiver.snapshot()
             if entry.get('error'):snap.update(status='error',error=entry['error'])
             return snap
@@ -200,6 +215,12 @@ class FleetMonitor:
         entry=next((e for e in self.entries.values() if e['snapshot'].get('run_id')==run),None)
         if not entry or not entry['port']:raise ValueError('分析会话未就绪或已经切换，请刷新')
         return entry
+    def query_target(self,request):
+        entry=self.owner(request.get('run_id'));snap=entry['snapshot']
+        if snap.get('cache_mode'):
+            if not snap.get('analysis_path') or snap.get('status')!='complete':raise ValueError('历史分析尚未完成，请稍后重试')
+            return dict(kind='root',path=str(Path(snap['analysis_path'])/'root/analysis.root'),state_dir=snap['state_dir'],snapshot=snap)
+        return dict(kind='sqlite',path=str(entry['directory']/'analysis.sqlite3'),state_dir=str(entry['directory']),snapshot=snap)
     def rates(self,request):
         entry=self.owner(request.get('run_id'))
         if request.get('live') and request.get('population','all')=='all' and entry['source']['kind']=='dat' and not self.replay:
@@ -218,6 +239,7 @@ class FleetMonitor:
             while data:=response.read(65536):yield data
     def close(self):
         self.stop.set()
+        if hasattr(self,'query_jobs'):self.query_jobs.close()
         if self.thread.ident:self.thread.join(timeout=5)
         for entry in self.entries.values():entry['stop'].set()
         for entry in self.entries.values():

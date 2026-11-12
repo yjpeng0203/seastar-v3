@@ -46,6 +46,7 @@ assert(normalized.min>0&&normalized.min<1e-7);
 const thumbnail=vm.runInContext('dashboard.option("thumbnail",{grid:{},xAxis:{},yAxis:{},series:[],dataZoom:[{type:"inside"}]})',context);
 assert.equal(thumbnail.dataZoom[0].disabled,true);assert.equal(thumbnail.toolbox.show,false);
 const appCode=fs.readFileSync(path.join(__dirname,'../static/app.js'),'utf8');
+context.renderResources=()=>{}; // The partial render extraction below tests channel controls only.
 context.$=node;node('logy').checked=true;node('normalized').checked=false;
 vm.runInContext(appCode.slice(appCode.indexOf('function addLogMarkers'),appCode.indexOf('function histogramSummary')),context);
 const isolated=vm.runInContext('(()=>{const o={series:[]};addLogMarkers(o,[{name:"CH0",d:{hist:[[.5,2],[1.5,3],[3999.5,1]],bin_width:1,n:6}}],.02);return o.series[0];})()',context);

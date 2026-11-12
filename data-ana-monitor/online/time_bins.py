@@ -125,6 +125,71 @@ def root_time_bins(path,cache_dir,request,snapshot):
 
 
 def sqlite_time_bins(path,request,snapshot):
+    import sqlite3
+    lo,hi,segment,_,_,seq=settings(request,snapshot)
+    width=request.get('time_bin_s',100)
+    if type(width) not in (int,float) or not math.isfinite(width) or width<=0 or (hi-lo)/width>100000:raise ValueError('时间箱宽无效')
+    if request.get('population','all') not in ('all','good'):raise ValueError('统计样本类型无效')
+    if width!=100:return _sqlite_time_bins_scan(path,request,snapshot)
+    from storage import ensure_time_index
+    db=sqlite3.connect(Path(path).resolve().as_uri()+'?mode=ro',uri=True)
+    try:
+        target=db.execute('SELECT COALESCE(MAX(seq),0) FROM metrics WHERE run=?',(request['run_id'],)).fetchone()[0]
+    finally:db.close()
+    ensure_time_index(path,request['run_id'],target if request.get('allow_latest') else min(seq,target))
+    db=sqlite3.connect(Path(path).resolve().as_uri()+'?mode=ro',uri=True)
+    try:
+        db.execute('BEGIN')
+        row=db.execute('SELECT max_seq FROM time_index WHERE run=?',(request['run_id'],)).fetchone()
+        actual=row[0] if row else 0
+        if actual>seq and not request.get('allow_latest'):
+            return _sqlite_time_bins_scan(path,request,snapshot)
+        # Keep the boundary bins exact, including wave/trigger offsets across a box edge.
+        margin=max([.001]+[abs(v)*1e-9 for c in snapshot.get('channels',[]) for v in (c.get('stats',{}).get('all',{}).get('wave_dt_ns',{}).get('min'),c.get('stats',{}).get('all',{}).get('wave_dt_ns',{}).get('max')) if isinstance(v,(float,int)) and math.isfinite(v)])
+        first=math.ceil((lo+margin)/100);stop=math.floor((hi-margin)/100)
+        bins={}
+        if stop>first:
+            for code,k,field,n,total,mean,m2 in db.execute('SELECT code,bin,field,n,total,mean,m2 FROM time_bins100 WHERE run=? AND segment=? AND population=? AND bin>=? AND bin<?',(request['run_id'],segment,request.get('population','all'),first,stop)):
+                key=(code,k)
+                if key not in bins:bins[key]=[[0.,0,0.,0.] for _ in range(7)]
+                bins[key][field]=[total,n,m2,mean]
+    finally:db.close()
+    from raw_trends import sqlite_page,FIELDS
+    query=dict(request,max_seq=actual,cursor=0,limit=100000)
+    spans=[(lo,hi)] if stop<=first else [(lo,min(hi,first*100+margin)),(max(lo,stop*100-margin),hi)]
+    for low,high in spans:
+        cursor=0
+        while True:
+            page=sqlite_page(path,dict(query,min_s=low,max_s=high,cursor=cursor),snapshot)
+            for row in page['rows']:
+                t=row[2];tt=row[3];code=int(row[1])
+                if not lo<=t<=hi:continue
+                outside=stop<=first or not first*100<=t<stop*100
+                if outside:
+                    b=bins.setdefault((code,math.floor(t/100)),[[0.,0,0.,0.] for _ in range(7)])
+                    for field,index in enumerate((4,5,6,7,8,9)):
+                        if field!=4 and request.get('population')=='good' and not row[8]:continue
+                        value=row[index]
+                        if value is not None:_add_moment(b[field],value)
+                if row[10] is not None and lo<=tt<=hi and (stop<=first or not first*100<=tt<stop*100):
+                    e=bins.setdefault((-1,math.floor(tt/100)),[[0.,0,0.,0.] for _ in range(7)])
+                    e[6][0]+=row[10];e[6][1]+=1
+            if page['done']:break
+            cursor=page['next_cursor']
+    rows=[];statistics=[]
+    for (code,k),items in sorted(bins.items()):
+        t=(max(lo,k*100)+min(hi,(k+1)*100))/2
+        rows.append([k,code,t,t]+[v[0]/v[1] if v[1] else None for v in items])
+        statistics.append([k,code]+[v for field,item in enumerate(items) for v in (item[1],(0. if field==6 else math.sqrt(max(0.,item[2]/(item[1]*(item[1]-1))))) if item[1]>1 else None)])
+    observations=sum(items[4][1] for (code,k),items in bins.items() if code!=-1)
+    return dict(bin_statistics=statistics,mean_error_model='sample standard error; N<2 unavailable',distributions=sqlite_distributions(path,query,snapshot) if request.get('include_distributions',True) else {},distributions_deferred=not request.get('include_distributions',True),fields=FIELDS,rows=rows,run_id=request['run_id'],raw=False,aggregation='time_mean',time_bin_s=100,observations=observations,count=len(rows),done=True,next_cursor=None,min_s=lo,max_s=hi,max_seq=actual,requested_max_seq=seq,snapshot_advanced=actual>seq,index_source='persistent 100 s moments')
+
+
+def _add_moment(item,value):
+    item[0]+=value;item[1]+=1;delta=value-item[3];item[3]+=delta/item[1];item[2]+=delta*(value-item[3])
+
+
+def _sqlite_time_bins_scan(path,request,snapshot):
     from raw_trends import sqlite_page
     width=request.get('time_bin_s',100)
     lo,hi,_,_,_,_=settings(request,snapshot)
@@ -158,10 +223,9 @@ def sqlite_distributions(path,request,snapshot):
     """Independent value histograms over the raw records, not over temporal means."""
     from raw_trends import sqlite_page
     from histograms import Counts
-    from array import array
     import numpy as np
     names=('baseline','noise','amplitude','area','quality','interval','event_interval')
-    accum={};delays={};cursor=0
+    accum={};delayed=set();low=math.inf;high=-math.inf;cursor=0
     while True:
         page=sqlite_page(path,dict(request,cursor=cursor,limit=100000),snapshot);grouped={}
         for row in page['rows']:
@@ -173,7 +237,10 @@ def sqlite_distributions(path,request,snapshot):
         for key,values in grouped.items():
             field=key[1];spec=request.get('histogram_settings',{}).get('interval' if field==6 else names[field])
             if field>=5 and not spec:
-                delays.setdefault(key,array('d')).extend(math.nan if v is None else v for v in values);continue
+                delayed.add(key)
+                for v in values:
+                    if v is not None and math.isfinite(v):low=min(low,v);high=max(high,v)
+                continue
             if key not in accum:
                 if spec:accum[key]=Counts(spec['min'],spec['max'],spec['bins'])
                 elif field==4:accum[key]=Counts(-.5,1.5,2)
@@ -181,12 +248,21 @@ def sqlite_distributions(path,request,snapshot):
             accum[key].add(values)
         if page['done']:break
         cursor=page['next_cursor']
-    finite=[v for values in delays.values() for v in values if math.isfinite(v)]
-    if finite:
-        low,high=min(finite),max(finite)
-        if low==high:high=low+1
-    else:low,high=0,1
-    for key,values in delays.items():accum[key]=Counts(low,high,256);accum[key].add(values)
+    # The first pass finds exact limits; a second bounded pass fills intervals.
+    # No array/list proportional to the full run is retained.
+    if not math.isfinite(low):low,high=0,1
+    elif low==high:high=low+1
+    for key in delayed:accum[key]=Counts(low,high,256)
+    cursor=0
+    while delayed:
+        page=sqlite_page(path,dict(request,cursor=cursor,limit=100000),snapshot);grouped={}
+        for row in page['rows']:
+            key=(int(row[1]),5)
+            if key in delayed and (request.get('population')!='good' or row[8]):grouped.setdefault(key,[]).append(row[9])
+            if (-1,6) in delayed and row[10] is not None:grouped.setdefault((-1,6),[]).append(row[10])
+        for key,values in grouped.items():accum[key].add(values)
+        if page['done']:break
+        cursor=page['next_cursor']
     output={}
     native_bounds={}
     for (code,field),value in accum.items():

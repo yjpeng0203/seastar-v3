@@ -5,6 +5,7 @@
 # 3) 前台启动 fee-monitor (:8765) 通过只读 SFTP 镜像树莓派慢控制 CSV（支持交互式输入密码）
 
 set -eu
+export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 ROOT_DIR="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 

@@ -88,7 +88,7 @@ class ReplayCache:
             snapshot_path=self.state_dir/'snapshot.json'
             if snapshot_path.exists():
                 saved=json.loads(snapshot_path.read_text())
-                if saved.get('display_schema')==2 and saved.get('run_id')==self.run_id and Path(saved.get('analysis_path','')) .joinpath('root/analysis.root').exists() and all((self.state_dir/(m+'.npz')).exists() for m in METRICS):
+                if saved.get('display_schema') in (2,3) and saved.get('run_id')==self.run_id and Path(saved.get('analysis_path','')) .joinpath('root/analysis.root').exists() and all((self.state_dir/(m+'.npz')).exists() or (self.state_dir/'native-bin-cache'/m/'bounds.json').exists() for m in METRICS):
                     self.analysis=Path(saved['analysis_path'])
                     metadata=json.loads((self.analysis/'analysis.json').read_text())
                     self.cached=dict(saved,state_dir=str(self.state_dir),analysis_sha256=metadata.get('backend_sha256',self.kernel),server_sha256=self.identity)
@@ -132,9 +132,10 @@ class ReplayCache:
         self.cached=dict(self.cached,status='replaying',cache_mode='native C++ batch')
         # Each subprocess is single-threaded; the shared read gate is used by incremental DAT readers.
         env=os.environ.copy()
+        env.setdefault('OMP_NUM_THREADS','1');env.setdefault('OPENBLAS_NUM_THREADS','1')
         if self.read_gate:
             env['SEASTAR_READ_GATE']=str(self.state_dir.parents[3]/'rotational-read.lock')
-        self.process=subprocess.Popen(args,env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1)
+        self.process=subprocess.Popen(args,env=env,start_new_session=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1)
         if self.paused:
             import signal
             self.process.send_signal(signal.SIGSTOP)
@@ -159,12 +160,14 @@ class ReplayCache:
     def load(self,directory,m):
         import ROOT as R
         R.gROOT.SetBatch(True)
+        sys.path.insert(0,str(PROJECT/'organizer'))
+        from figure_data import export_plot_data,read_histogram,native_rows,native_axis
         # Scientific figure revisions already contain exact full-range native bins.
         figures=[]
         for meta in (self.input.parent.parent/'results').glob('figures_*/analysis.json'):
             try:
                 fm=json.loads(meta.read_text())
-                if (fm.get('config')==asdict(self.config) and fm.get('waves')==m['waves'] and fm.get('kernel_sha256')==self.kernel and
+                if (fm.get('histogram_storage_schema')=='native-bins-bounded-v2' and fm.get('config')==asdict(self.config) and fm.get('waves')==m['waves'] and fm.get('kernel_sha256')==self.kernel and
                     any(Path(k).name==self.input.name and v==dict(size=self.signature[0],mtime_ns=self.signature[1]) for k,v in fm.get('input_stats',{}).items())):
                     focused=meta.parent/'root/focused.root'
                     if focused.exists():figures.append(focused)
@@ -190,23 +193,21 @@ class ReplayCache:
             if name not in METRICS:continue
             c['stats'][row['population']][name]={k:(int(row[k]) if k=='n' else float(row[k]) if row[k] else None) for k in ('n','mean','sigma','min','max')}
         for name in METRICS:
-            arrays={};bounds=None
+            cache_dir=self.state_dir/'native-bin-cache'/name;cache_dir.mkdir(parents=True,exist_ok=True)
+            bounds=None
             for ch,c in channels.items():
                 for pop in ('all','good'):
-                    h=native.Get(f'full_{"accepted" if pop=="good" else pop}_{name}_ch{ch}')
-                    if not h:raise ValueError('缺少完整原始分箱：'+name)
-                    count=np.frombuffer(h.GetArray(),dtype=np.float64,count=h.GetNbinsX()+2)[1:-1]
-                    ix=np.flatnonzero(count)
-                    x=h.GetXaxis().GetXmin()+(ix+.5)*h.GetBinWidth(1)
-                    hist=np.column_stack((x,count[ix]));arrays[pop+'_'+str(ch)]=hist
-                    d=c['stats'][pop][name];d.update(bin_width=1,bin_origin=h.GetXaxis().GetXmin())
-                    d['hist']=preview_result(dict(min=h.GetXaxis().GetXmin(),max=h.GetXaxis().GetXmax(),bin_width=1,series=[{'hist':hist.tolist()}]),256)['series'][0]['hist']
-                    d['preview']=True
-                    bounds=[h.GetXaxis().GetXmin(),h.GetXaxis().GetXmax(),h.GetNbinsX()]
-                    if int(count.sum())!=d['n'] or h.GetBinContent(0) or h.GetBinContent(h.GetNbinsX()+1):raise ValueError('完整分箱计数不守恒：'+name)
-            temporary=self.state_dir/(name+'.tmp.npz')
-            np.savez_compressed(temporary,bounds=np.array(bounds),**arrays)
-            temporary.replace(self.state_dir/(name+'.npz'))
+                    h=read_histogram(native,f'full_{"accepted" if pop=="good" else pop}_{name}_ch{ch}')
+                    axis=native_axis(h)
+                    hist=native_rows(h)
+                    d=c['stats'][pop][name];d.update(bin_width=1,bin_origin=axis.GetXmin())
+                    d['hist']=native_rows(h,256).tolist();d['preview']=True
+                    bounds=[axis.GetXmin(),axis.GetXmax(),axis.GetNbins()]
+                    if int(hist[:,1].sum())!=d['n'] or int(h.GetEntries())!=d['n']:raise ValueError('完整分箱计数不守恒：'+name)
+                    temporary=cache_dir/(pop+'_'+str(ch)+'.tmp.npy')
+                    np.save(temporary,hist,allow_pickle=False);temporary.replace(cache_dir/(pop+'_'+str(ch)+'.npy'))
+                    del hist,h
+            temporary=cache_dir/'bounds.tmp';temporary.write_text(json.dumps(bounds));temporary.replace(cache_dir/'bounds.json')
         for row in table('quality.csv'):
             c=channels[int(row['channel'])];c['n']=int(row['waves']);c['good']=int(row['good']);c['density_count']=int(row['density_waveforms'])
             c['flags']={name:int(row['flag_'+str(bit)]) for bit,name in FLAG_NAMES.items()}
@@ -261,7 +262,7 @@ std::vector<double> seastar_scatter(TTree* t) {
         tree=f.Get('metrics');scatter=R.seastar_scatter(tree)
         for i in range(0,len(scatter),4):channels[int(scatter[i])]['scatter'].append([float(v) for v in scatter[i+1:i+4]])
         tree.GetEntry(0);origin=int(tree.trigger_ns);tree.GetEntry(tree.GetEntries()-1);last=int(tree.trigger_ns)
-        snapshot=dict(self.cached,display_schema=2,analysis_sha256=m.get('backend_sha256',self.kernel),status='complete',cache_mode='validated analysis cache',channels=list(channels.values()),
+        snapshot=dict(self.cached,display_schema=3,analysis_sha256=m.get('backend_sha256',self.kernel),status='complete',cache_mode='validated analysis cache',channels=list(channels.values()),
           triggers=m['events'],wave_events=m['events']-m.get('empty_saved_events',0),waves=m['waves'],seq=m['waves']+m['events'],
           good=m['good'],good_fraction=m['good']/m['waves'],backlog=0,span_s=sum(m.get('segment_spans_s',[])),relative_s=m.get('segment_spans_s',[0])[-1],version='adaptive-1.2',segment=segment,
           segments=m.get('segments',1),origin_ns=str(last-int(float(tree.t)*1e9)),last_ns=str(last),
@@ -288,37 +289,14 @@ std::vector<double> seastar_scatter(TTree* t) {
         from raw_trends import root_page
         with ROOT_LOCK:return root_page(self.analysis/'root/analysis.root',self.state_dir,request,self.cached)
 
+    def query_target(self,request):
+        if self.analysis is None or self.cached.get('status')!='complete':raise ValueError('首次分析缓存尚未完成，进度见串任务卡片')
+        if request.get('run_id')!=self.run_id:raise ValueError('分析会话已变化，请刷新')
+        return dict(kind='root',path=str(self.analysis/'root/analysis.root'),state_dir=str(self.state_dir),snapshot=self.snapshot())
+
     def histogram(self,request):
         if self.snapshot().get('status')=='error':raise ValueError(self.snapshot()['error'])
-        if request.get('run_id')!=self.run_id:raise ValueError('分析会话已变化，请刷新')
-        if self.analysis is None or self.cached.get('status')!='complete':raise ValueError('首次分析缓存尚未完成，进度见串任务卡片')
-        metric=request.get('metric');keys=request.get('channels',[]);pop=request.get('population','good')
-        if metric not in METRICS and metric not in ('interval_log10_s','trigger_interval_log10_s','pair_dt_ns'):raise ValueError('不支持的指标')
-        allowed={c['key'] for c in self.cached.get('channels',[])}
-        if not isinstance(keys,list) or any(k not in allowed for k in keys):raise ValueError('通道无效')
-        if pop not in ('all','good'):raise ValueError('样本类型无效')
-        if metric not in METRICS or request.get('binning')!='native':return self.custom_histogram(request)
-        with np.load(self.state_dir/(metric+'.npz')) as data:
-            lo,hi,bins=data['bounds'];series=[]
-            for c in self.cached['channels']:
-                if c['key'] not in keys:continue
-                hist=data[pop+'_'+c['key'].split(':')[1]].tolist();d=c['stats'][pop][metric]
-                series.append(dict(key=c['key'],hist=hist,n=d['n'],total=d['n'],underflow=0,overflow=0,
-                  missing=c['n' if pop=='all' else 'good']-d['n'],mean=d['mean'],sigma=d['sigma']))
-        seq=request.get('max_seq',self.cached['seq'])
-        if type(seq) is not int or seq<0:raise ValueError('记录水位无效')
-        if seq<self.cached['seq']:
-            if bins>2000000:raise ValueError('冻结范围过大，请明确指定需要检查的区间')
-            frozen=dict(request,min=float(lo),max=float(hi),bins=int(bins))
-            frozen.pop('preview_points',None)
-            result=self.custom_histogram(frozen,max_bins=2000000)
-            occupied=[i for item in result['series'] for i,n in enumerate(item['counts']) if n]
-            first,last=(min(occupied),max(occupied)+1) if occupied else (0,1)
-            for item in result['series']:item['counts']=item['counts'][first:last]
-            result.update(min=float(lo)+first,max=float(lo)+last,bins=last-first,binning='native')
-            return preview_result(result,request.get('preview_points'))
-        result=dict(metric=metric,run_id=self.run_id,max_seq=self.cached['seq'],min=float(lo),max=float(hi),bins=int(bins),bin_width=1,population=pop,series=series,binning='native',index_source='persistent ROOT cache')
-        return preview_result(result,request.get('preview_points'))
+        with ROOT_LOCK:return query_saved_histogram(self.query_target(request),request)
 
     def custom_histogram(self,request,max_bins=4096):
         from root_queries import histogram
@@ -329,3 +307,54 @@ std::vector<double> seastar_scatter(TTree* t) {
         if run_id!=self.run_id:raise ValueError('分析会话不存在')
         from root_queries import export_csv
         yield from export_csv(self.analysis/'root/analysis.root',run_id,asdict(self.config),self.kernel,channel,max_seq)
+
+
+def _preview_rows(hist, low, high, points):
+    """Bounded two-pass envelope selection on mmap/NumPy rows, before creating Python lists."""
+    if type(points) is not int or not 32<=points<=4096 or len(hist)<=points:return hist.tolist()
+    maxima=np.full(points,-np.inf);best=np.full(points,-1,dtype=np.int64)
+    scale=points/(high-low)
+    for start in range(0,len(hist),65536):
+        chunk=hist[start:start+65536];buckets=np.clip(((chunk[:,0]-low)*scale).astype(np.int64),0,points-1)
+        np.maximum.at(maxima,buckets,chunk[:,1])
+    for start in range(0,len(hist),65536):
+        chunk=hist[start:start+65536];buckets=np.clip(((chunk[:,0]-low)*scale).astype(np.int64),0,points-1)
+        winners=np.flatnonzero(chunk[:,1]==maxima[buckets])
+        kinds,first=np.unique(buckets[winners],return_index=True)
+        unseen=best[kinds]<0;best[kinds[unseen]]=start+winners[first[unseen]]
+    return hist[best[best>=0]].tolist()
+
+
+def query_saved_histogram(target,request):
+    """Standalone ROOT query entry point for an isolated, cancellable query process."""
+    from root_queries import histogram,native_histogram
+    snapshot=target['snapshot'];metric=request.get('metric');keys=request.get('channels',[]);pop=request.get('population','good')
+    if request.get('run_id')!=snapshot.get('run_id'):raise ValueError('分析会话已变化，请刷新')
+    if metric not in METRICS and metric not in ('interval_log10_s','trigger_interval_log10_s','pair_dt_ns'):raise ValueError('不支持的指标')
+    allowed={c['key'] for c in snapshot.get('channels',[])}
+    if not isinstance(keys,list) or any(k not in allowed for k in keys):raise ValueError('通道无效')
+    if pop not in ('all','good'):raise ValueError('样本类型无效')
+    seq=request.get('max_seq',snapshot['seq'])
+    if type(seq) is not int or seq<0:raise ValueError('记录水位无效')
+    if metric not in METRICS or request.get('binning')!='native':return preview_result(histogram(target['path'],request,snapshot),request.get('preview_points'))
+    if seq<snapshot['seq']:return native_histogram(target['path'],request,snapshot)
+    directory=Path(target['state_dir']);folder=directory/'native-bin-cache'/metric
+    legacy=None
+    if (folder/'bounds.json').is_file():lo,hi,bins=json.loads((folder/'bounds.json').read_text())
+    elif (directory/(metric+'.npz')).is_file():
+        legacy=np.load(directory/(metric+'.npz'));lo,hi,bins=legacy['bounds']
+    else:return native_histogram(target['path'],request,snapshot)
+    series=[]
+    try:
+        for c in snapshot['channels']:
+            if c['key'] not in keys:continue
+            key=pop+'_'+c['key'].split(':')[1]
+            hist=legacy[key] if legacy is not None else np.load(folder/(key+'.npy'),mmap_mode='r',allow_pickle=False)
+            d=c['stats'][pop][metric]
+            series.append(dict(key=c['key'],hist=_preview_rows(hist,float(lo),float(hi),request.get('preview_points')),n=d['n'],total=d['n'],underflow=0,overflow=0,
+                               missing=c['n' if pop=='all' else 'good']-d['n'],mean=d['mean'],sigma=d['sigma']))
+            del hist
+    finally:
+        if legacy is not None:legacy.close()
+    return dict(metric=metric,run_id=snapshot['run_id'],max_seq=snapshot['seq'],min=float(lo),max=float(hi),bins=int(bins),bin_width=1,population=pop,series=series,
+                binning='native',preview=type(request.get('preview_points')) is int and 32<=request['preview_points']<=4096,index_source='persistent ROOT mmap cache')

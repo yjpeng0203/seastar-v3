@@ -92,10 +92,13 @@ class CounterStore:
         temporary.write_text(json.dumps(value)); temporary.replace(path)
 
     def close(self):
+        if hasattr(self.reader,'close'):self.reader.close()
         self.db.close(); self.lock.close()
 
 
 def work(data_dir, state_dir, source_key, stop, follow, parent):
+    from runtime_resources import role
+    role('SeaCount-'+source_key.split('_run')[0].split('/')[-1][-5:])
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     store = None; source = None
     try:

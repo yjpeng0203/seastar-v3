@@ -3,6 +3,8 @@
 #include <TCanvas.h>
 #include <TH1.h>
 #include <TH2.h>
+#include <THnSparse.h>
+#include <memory>
 #include <TGraph.h>
 #include <TStyle.h>
 #include <TLegend.h>
@@ -47,6 +49,9 @@ std::vector<TPad*> panels; std::vector<std::string> pages,main_pages;
 std::ofstream caption_file; int columns=2;
 const double width_pt=18.3/2.54*72, height_pt=18.3/2.54*72*1400/1200.;
 int colors[8];
+std::map<std::string,TH1*> loaded_histograms;
+std::map<std::string,std::pair<int,double>> native_definitions;
+bool sparse_preview=false;
 std::string escape(std::string text) {
     std::string result;
     for(char c:text) {if(c=='"'||c=='\\')result+='\\';if(c=='\n')result+="\\n";else result+=c;}
@@ -61,7 +66,8 @@ void axes(TAxis *x,TAxis *y,const std::string &xt,const std::string &yt) {
     x->SetTitle("");y->SetTitle("");shared_x=xt;shared_y=yt;
 }
 void begin_figure(const std::string &title,int count=8,int cols=2) {
-    canvas->Clear();canvas->cd();panels.clear();columns=cols;shared_x.clear();shared_y.clear();
+    canvas->Clear();for(auto& item:loaded_histograms)delete item.second;loaded_histograms.clear();native_definitions.clear();sparse_preview=false;
+    canvas->cd();panels.clear();columns=cols;shared_x.clear();shared_y.clear();
     text(.055,.962,string_label+" | "+title,28);
     auto body=new TPad("body","",.025,.14,.98,.88);body->SetFillStyle(0);body->SetBorderMode(0);body->SetBorderSize(0);body->Draw();body->Divide(cols,(count+cols-1)/cols,.012,.018);
     for(int i=0;i<count;++i) {
@@ -86,7 +92,8 @@ void save(const std::string &name,const std::string &caption,bool primary=false)
     canvas->cd();
     if(!shared_x.empty())text(.42,.127,shared_x,19);
     if(!shared_y.empty()){auto t=new TLatex(.033,.49,shared_y.c_str());t->SetNDC();t->SetTextFont(43);t->SetTextSize(19);t->SetTextAngle(90);t->Draw();}
-    std::istringstream words(caption);std::string word,line;int row=0;
+    std::string figure_caption=caption+(sparse_preview?" Display uses an occupied-bin envelope; every native bin and count is retained exactly in ROOT and tables.":"");
+    std::istringstream words(figure_caption);std::string word,line;int row=0;
     while(words>>word) {
         if(line.size()+word.size()+1>112) {text(.055,.097-row*.024,line,17);++row;line.clear();}
         if(!line.empty())line+=' ';line+=word;
@@ -98,9 +105,30 @@ void save(const std::string &name,const std::string &caption,bool primary=false)
     canvas->Print((output+"/pdf/"+name+".pdf").c_str());canvas->cd();
     canvas->Print((output+"/pdf/diagnostics.pdf").c_str());
     if(primary) {canvas->cd();canvas->Print((output+"/pdf/summary.pdf").c_str());main_pages.push_back(name);}
-    pages.push_back(name);caption_file<<name<<"\t"<<caption<<"\n";
+    pages.push_back(name);caption_file<<name<<"\t"<<figure_caption<<"\n";
 }
-TH1* histogram(TFile *file,const std::string &name) {return dynamic_cast<TH1*>(file->Get(name.c_str()));}
+TH1* histogram(TFile *file,const std::string &name) {
+    auto found=loaded_histograms.find(name);if(found!=loaded_histograms.end())return found->second;
+    auto key=file->GetKey(name.c_str());if(!key)return nullptr;
+    std::unique_ptr<TObject> object(key->ReadObj());
+    auto h=dynamic_cast<TH1*>(object.get());
+    if(h){h->SetDirectory(nullptr);loaded_histograms[name]=h;object.release();return h;}
+    auto sparse=dynamic_cast<THnSparse*>(object.get());if(!sparse)return nullptr;
+    auto axis=sparse->GetAxis(0);native_definitions[name]={axis->GetNbins(),axis->GetBinWidth(1)};
+    std::map<int,std::pair<int,double>> envelope;double below=0,above=0;Int_t coordinate[1];
+    for(Long64_t i=0;i<sparse->GetNbins();++i){double n=sparse->GetBinContent(i,coordinate);int k=coordinate[0];
+        if(k==0){below+=n;continue;}if(k==axis->GetNbins()+1){above+=n;continue;}if(!n)continue;
+        int bucket=std::min(4095,int((axis->GetBinCenter(k)-axis->GetXmin())*4096/(axis->GetXmax()-axis->GetXmin())));
+        auto old=envelope.find(bucket);if(old==envelope.end()||n>old->second.second)envelope[bucket]={k,n};
+    }
+    std::map<int,double> retained;std::set<double> edges{axis->GetXmin(),axis->GetXmax()};
+    for(auto &item:envelope){int k=item.second.first;retained[k]=item.second.second;edges.insert(axis->GetBinLowEdge(k));edges.insert(axis->GetBinUpEdge(k));}
+    std::vector<double> boundaries(edges.begin(),edges.end());
+    h=new TH1D((name+"_display").c_str(),"",boundaries.size()-1,boundaries.data());h->SetDirectory(nullptr);
+    for(auto &item:retained)h->SetBinContent(h->FindBin(axis->GetBinCenter(item.first)),item.second);
+    h->SetBinContent(0,below);h->SetBinContent(h->GetNbinsX()+1,above);h->SetEntries(sparse->GetEntries());
+    loaded_histograms[name]=h;sparse_preview=true;return h;
+}
 TGraph* graph(const std::string &name) {
     auto g=dynamic_cast<TGraph*>(source->Get(name.c_str()));
     return g?g:(readback?dynamic_cast<TGraph*>(readback->Get(name.c_str())):nullptr);
@@ -152,7 +180,7 @@ void render_analysis(const char *source_path,const char *focus_path,const char *
         for(int ch=0;ch<8;++ch) {
             panels[ch]->cd();if(logy)panels[ch]->SetLogy();auto all=histogram(focus,prefix+"all_"+m.key+"_ch"+std::to_string(ch));auto good=histogram(focus,prefix+"accepted_"+m.key+"_ch"+std::to_string(ch));
             if(!all||!good)throw std::runtime_error("Missing focused histogram");
-            auto a=(TH1*)all->Clone();auto g=(TH1*)good->Clone();a->SetDirectory(nullptr);g->SetDirectory(nullptr);
+            auto a=(TH1*)all->Clone();auto g=(TH1*)good->Clone();a->SetDirectory(nullptr);g->SetDirectory(nullptr);a->SetBit(kCanDelete);g->SetBit(kCanDelete);
             a->SetLineColor(TColor::GetColor("#A6A9AC"));a->SetLineWidth(2);g->SetLineColor(colors[ch]);g->SetLineWidth(2);
             a->SetMinimum(logy?.5:0);a->SetMaximum(std::max(1.,a->GetMaximum()*1.15));a->Draw("hist");g->Draw("hist same");axes(a->GetXaxis(),a->GetYaxis(),m.unit,"Waveforms / bin");
             if(logy){a->GetYaxis()->SetLabelSize(19);a->GetYaxis()->SetNdivisions(303);}else a->GetYaxis()->ChangeLabel(1,-1,0);
@@ -167,7 +195,8 @@ void render_analysis(const char *source_path,const char *focus_path,const char *
         }
         canvas->cd();text(.57,.915,"Grey: all waveforms   Colour: accepted",18);
         auto definition=histogram(focus,prefix+"all_"+m.key+"_ch0");std::ostringstream bin_label;
-        bin_label<<definition->GetNbinsX()<<" bins | width "<<std::setprecision(6)<<definition->GetBinWidth(1);
+        auto native_definition=native_definitions.find(prefix+"all_"+m.key+"_ch0");
+        bin_label<<(native_definition==native_definitions.end()?definition->GetNbinsX():native_definition->second.first)<<" bins | width "<<std::setprecision(6)<<(native_definition==native_definitions.end()?definition->GetBinWidth(1):native_definition->second.second);
         bool converted_integral=m.key=="charge_pc" || m.key=="tail_negative_pc";
         bool converted_adc=m.key=="amplitude_mv" || m.key=="baseline_mv" || m.key=="noise_mv";
         bin_label<<(converted_integral?" pC (1 ADC sample)":converted_adc?" mV (1 ADC)":" "+m.unit);text(.055,.915,bin_label.str(),18);
@@ -187,7 +216,7 @@ void render_analysis(const char *source_path,const char *focus_path,const char *
         for(int ch=0;ch<8;++ch) {
             auto original=histogram(focus,"full_accepted_"+m.key+"_ch"+std::to_string(ch));
             if(!original||original->GetEntries()==0)continue;
-            auto h=(TH1*)original->Clone();h->SetDirectory(nullptr);h->Scale(1./original->GetEntries());h->SetLineColor(colors[ch]);h->SetLineWidth(2);
+            auto h=(TH1*)original->Clone();h->SetDirectory(nullptr);h->SetBit(kCanDelete);h->Scale(1./original->GetEntries());h->SetLineColor(colors[ch]);h->SetLineWidth(2);
             lo=std::min(lo,h->GetXaxis()->GetXmin());hi=std::max(hi,h->GetXaxis()->GetXmax());peak=std::max(peak,h->GetMaximum());spectra.push_back(h);
         }
         if(!spectra.empty()) {
@@ -206,7 +235,7 @@ void render_analysis(const char *source_path,const char *focus_path,const char *
         begin_figure(trend_titles[k]+" | electronic-clock segment "+std::to_string(seg));
         for(int ch=0;ch<8;++ch) {
             panels[ch]->cd();auto g=graph(trend_names[k]+"_ch"+std::to_string(ch)+"_segment"+std::to_string(seg));
-            if(g) {auto copy=(TGraph*)g->Clone();for(int i=0;i<copy->GetN();++i)copy->SetPointX(i,copy->GetPointX(i)/3600.);line_graph(copy,"Relative time (h)",trend_units[k],colors[ch]);}
+            if(g) {auto copy=(TGraph*)g->Clone();copy->SetBit(kCanDelete);for(int i=0;i<copy->GetN();++i)copy->SetPointX(i,copy->GetPointX(i)/3600.);line_graph(copy,"Relative time (h)",trend_units[k],colors[ch]);}
             text(.17,.86,"CH "+std::to_string(ch),18);
         }
         save(trend_names[k]+"_segment"+std::to_string(seg),"Each string retains its own electronic-clock origin. Rates use observed bin exposure; area uses accepted waveforms, whereas baseline and noise use all waveforms. Clock segments are not joined.",k==0);
@@ -235,7 +264,7 @@ void render_analysis(const char *source_path,const char *focus_path,const char *
     double density_high=std::max(1.,std::ceil(std::log10(1+density_max)));
     for(int ch=0;ch<8;++ch) {
         panels[ch]->cd();panels[ch]->SetRightMargin(.17);auto original=(TH2*)source->Get(("density_ch"+std::to_string(ch)).c_str());
-        if(original){auto h=(TH2*)original->Clone();h->SetDirectory(nullptr);
+        if(original){auto h=(TH2*)original->Clone();h->SetDirectory(nullptr);h->SetBit(kCanDelete);
             for(int i=1;i<=h->GetNbinsX();++i)for(int j=1;j<=h->GetNbinsY();++j)h->SetBinContent(i,j,std::log10(1+original->GetBinContent(i,j)));
             h->SetMinimum(0);h->SetMaximum(density_high);h->Draw("colz");axes(h->GetXaxis(),h->GetYaxis(),"Fractional position","Raw ADC");h->GetZaxis()->SetLabelFont(43);h->GetZaxis()->SetLabelSize(19);h->GetZaxis()->SetNdivisions(303);h->GetZaxis()->SetNoExponent(true);}
         text(.17,.86,"CH "+std::to_string(ch),18);
@@ -250,7 +279,7 @@ void render_analysis(const char *source_path,const char *focus_path,const char *
     flags.Draw("colz");axes(flags.GetXaxis(),flags.GetYaxis(),"Quality flag","Channel");flags.GetXaxis()->LabelsOption("v");flags.GetZaxis()->SetLabelFont(43);flags.GetZaxis()->SetLabelSize(18);
     save("quality_flags","Percentages use all waveforms in each channel as their denominator. A waveform can carry several flags, so percentages need not sum to 100%.",true);
     for(std::string name:{"multiplicity","trigger_interval"}) {
-        begin_figure(name=="multiplicity"?"Multiplicity of saved events":"Intervals between waveform events",1,1);panels[0]->cd();auto h=(TH1*)histogram(focus,"unit_"+name)->Clone();h->SetDirectory(nullptr);
+        begin_figure(name=="multiplicity"?"Multiplicity of saved events":"Intervals between waveform events",1,1);panels[0]->cd();auto h=(TH1*)histogram(focus,"unit_"+name)->Clone();h->SetDirectory(nullptr);h->SetBit(kCanDelete);
         h->SetLineColor(colors[0]);h->SetLineWidth(2);h->Draw("hist");
         axes(h->GetXaxis(),h->GetYaxis(),name=="multiplicity"?"Waveforms per saved event":"log10(interval / s)","Saved events");
         save(name,"The input ROOT omits original empty triggers. These within-board saved-event statistics therefore do not define the total DAQ trigger rate.");
@@ -282,5 +311,6 @@ void render_analysis(const char *source_path,const char *focus_path,const char *
     for(size_t i=0;i<pages.size();++i){if(i)manifest<<",";manifest<<"\""<<escape(pages[i])<<"\"";}
     manifest<<"],\"overview_pages\":[";for(size_t i=0;i<main_pages.size();++i){if(i)manifest<<",";manifest<<"\""<<main_pages[i]<<"\"";}
     manifest<<"],\"summary_pages\":"<<main_pages.size()<<",\"complete_pages\":"<<pages.size()<<"}";
-    source->Close();focus->Close();if(readback)readback->Close();
+    canvas->Clear();for(auto& item:loaded_histograms)delete item.second;loaded_histograms.clear();
+    source->Close();focus->Close();if(readback)readback->Close();delete canvas;canvas=nullptr;
 }

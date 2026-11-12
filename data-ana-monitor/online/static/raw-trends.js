@@ -52,14 +52,16 @@ const rawTrends=(()=>{
   const [lo,hi]=interval();if(!Number.isFinite(lo)||!Number.isFinite(hi)||lo>=hi){status("请输入有效采集时间范围（秒）。");return;}
   if(reset){cursors=[0];pageNumber=0;}
   if(controller)controller.abort();controller=new AbortController();const current=++generation;
+  const queryId=typeof queryClient!=="undefined"?queryClient.start("trend",controller):undefined;
   busy=true;for(const id of ["raw-prev","raw-next","detail-raw-prev","detail-raw-next"]){const b=get(id);if(b)b.disabled=true;}lastAttempt=performance.now();lastSeq=state.seq||0;status(timeEnabled?"正在按指定时间箱统计完整所选时段，原始指标保持不变…":"正在读取逐条原值；首次建立检索索引可能需要数秒，不计算时间箱均值。");
   const binned=timeEnabled;
   loadingDescription=binned?"正在计算 "+timeWidth+" s 时间箱，源记录 "+fmt(state.waves,0)+" 条":"正在读取逐条原值";
-  const body={time_bin_s:timeWidth,population:get("population").value,histogram_settings:valueHistogramSettings(),include_distributions:wantsDistributions(),run_id:state.run_id,min_s:lo,max_s:hi,segment:Number(get("raw-segment").value||state.segment||0),cursor:cursors[pageNumber]||0,limit:50000,max_seq:state.seq||0};
+  const body={time_bin_s:timeWidth,population:get("population").value,histogram_settings:valueHistogramSettings(),include_distributions:wantsDistributions(),run_id:state.run_id,min_s:lo,max_s:hi,segment:Number(get("raw-segment").value||state.segment||0),cursor:cursors[pageNumber]||0,limit:50000,max_seq:state.seq||0,allow_latest:!frozen,_query_id:queryId};
   fetch(binned?"api/time-trend":"api/raw-trend",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body),signal:controller.signal})
    .then(async response=>{const result=await response.json();if(!response.ok)throw Error(result.error||"原值读取失败");return result;})
    .then(result=>{if(current!==generation)return;page=result;loadedPage=pageNumber;busy=false;paint();})
-   .catch(error=>{if(current===generation&&error.name!=="AbortError"){busy=false;status("读取失败："+error.message);}});
+   .catch(error=>{if(current===generation&&error.name!=="AbortError"){busy=false;status("读取失败："+error.message);}})
+   .finally(()=>{if(typeof queryClient!=="undefined")queryClient.finish(queryId);});
  }
  function paint(){
   if(!page||page.run_id!==state.run_id)return;
@@ -110,7 +112,7 @@ const rawTrends=(()=>{
     }
   }
   for(const id of ["raw-prev","detail-raw-prev"]){const b=get(id);if(b)b.disabled=busy||pageNumber===0;}for(const id of ["raw-next","detail-raw-next"]){const b=get(id);if(b)b.disabled=busy||page.done;}
-  if(binned){status("时间箱宽 "+page.time_bin_s+" s · 完整时段 "+fmt(page.observations,0)+" 条原始记录 → "+fmt(page.count,0)+" 组通道/事件箱统计；各图按通道连线，原值可切换查看");return;}
+  if(binned){status("时间箱宽 "+page.time_bin_s+" s · 完整时段 "+fmt(page.observations,0)+" 条原始记录 → "+fmt(page.count,0)+" 组通道/事件箱统计；各图按通道连线，原值可切换查看"+(page.snapshot_advanced?" · 已使用最新一致快照 #"+page.max_seq:""));return;}
   status("逐条原值第 "+(loadedPage+1)+" 页 · "+fmt(page.count,0)+" 条完整记录 · 本页采集秒 "+fmt(lo,9)+"–"+fmt(hi,9)+(page.done?" · 所选范围已读完":" · 尚有后续页（没有抽点或合并）"));
  }
  function render(){
@@ -133,5 +135,6 @@ const rawTrends=(()=>{
  get("raw-segment").onchange=()=>{key="";render();};
  if(typeof setInterval!=="undefined")setInterval(()=>{if(busy)status(loadingDescription+" · 已用 "+fmt((performance.now()-lastAttempt)/1000,1)+" s");},1000);
  if(typeof setInterval!=="undefined")setInterval(rateView,1000);
- return {displaySettings:()=>({time_bin_enabled:timeEnabled,time_bin_s:timeWidth,page:loadedPage+1,aggregation:page?.aggregation||"none"}),render,reload:()=>load(true)};
+ function cancel(){if(typeof queryClient!=="undefined")queryClient.cancel("trend");if(controller)controller.abort();generation++;busy=false;key="";}
+ return {cancel,displaySettings:()=>({time_bin_enabled:timeEnabled,time_bin_s:timeWidth,page:loadedPage+1,aggregation:page?.aggregation||"none"}),render,reload:()=>load(true)};
 })();
